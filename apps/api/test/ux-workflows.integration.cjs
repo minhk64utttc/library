@@ -1,0 +1,110 @@
+// Dedicated PostgreSQL schema only; never writes to the application's public schema.
+const assert = require('node:assert/strict');
+const { randomUUID } = require('node:crypto');
+const { readFileSync } = require('node:fs');
+const { resolve } = require('node:path');
+const { spawn, spawnSync } = require('node:child_process');
+const { PrismaClient } = require('@prisma/client');
+const { hash } = require('@node-rs/argon2');
+const root = resolve(__dirname, '../../..');
+const configured = process.env.DATABASE_URL || readFileSync(resolve(root, '.env'), 'utf8').match(/^DATABASE_URL=["']?([^\r\n"']+)/m)?.[1];
+assert.ok(configured, 'DATABASE_URL is required');
+const database = new URL(configured);
+const schema = `ux_test_${Date.now()}`;
+database.searchParams.set('schema', schema);
+const env = { ...process.env, DATABASE_URL: database.toString(), NODE_ENV: 'test', PORT: '3107', SESSION_SECRET: randomUUID(), SMTP_HOST: 'localhost', SMTP_PORT: '1' };
+const migrated = spawnSync(process.execPath, [resolve(root, 'node_modules/prisma/build/index.js'), 'migrate', 'deploy', '--schema', 'apps/api/prisma/schema.prisma'], { cwd: root, env, encoding: 'utf8' });
+assert.equal(migrated.status, 0, migrated.stderr);
+const db = new PrismaClient({ datasources: { db: { url: database.toString() } } });
+let app;
+let appLog = '';
+const base = 'http://localhost:3107/api';
+async function call(path, cookie, body) {
+  const response = await fetch(base + path, { method: body === undefined ? 'GET' : 'POST', headers: { ...(cookie ? { Cookie: cookie } : {}), 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  return { status: response.status, data: await response.json().catch(() => null), cookie: response.headers.get('set-cookie')?.split(';')[0] };
+}
+async function main() {
+  app = spawn(process.execPath, [resolve(root, 'apps/api/dist/main.js')], { cwd: root, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  app.stdout.on('data', data => { appLog += data; });
+  app.stderr.on('data', data => { appLog += data; });
+  let ready = false;
+  for (let retry = 0; retry < 150; retry++) {
+    try { if ((await call('/auth/me')).status === 401) { ready = true; break; } } catch {}
+    if (app.exitCode !== null) break;
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  assert.ok(ready, `API failed to start: ${appLog}`);
+  const password = 'UxTest-2026-Strong!';
+  const passwordHash = await hash(password);
+  async function account(role) {
+    const user = await db.account.create({ data: { email: `${role}-${randomUUID()}@test.local`, passwordHash, roles: { create: { role } }, profile: { create: { fullName: role } } } });
+    const login = await call('/auth/login', null, { email: user.email, password });
+    assert.equal(login.status, 200);
+    return { ...user, cookie: login.cookie };
+  }
+  const reader = await account('reader');
+  const other = await account('reader');
+  const collector = await account('circulation');
+  const admin = await account('admin');
+  const cataloger = await account('cataloging');
+  const manager = await account('manager');
+  const card = await db.libraryCard.create({ data: { accountId: reader.id, cardNumber: 'UX-CARD-EXACT', expiresAt: new Date(Date.now() + 86400000 * 30) } });
+  const otherCard = await db.libraryCard.create({ data: { accountId: other.id, cardNumber: 'UX-OTHER-CARD', expiresAt: new Date(Date.now() + 86400000 * 30) } });
+  await db.libraryCardEvent.create({ data: { cardId: card.id, actorId: collector.id, action: 'issued', reason: 'OWN EVENT' } });
+  await db.libraryCardEvent.create({ data: { cardId: otherCard.id, actorId: collector.id, action: 'locked', reason: 'PRIVATE OTHER EVENT' } });
+  const work = await db.work.create({ data: { title: 'UX needle title', status: 'published' } });
+  const edition = await db.edition.create({ data: { workId: work.id } });
+  const copy = await db.copy.create({ data: { code: 'UX-COPY-EXACT', editionId: edition.id, status: 'available' } });
+  await db.policyVersion.upsert({ where: { scopeKey_versionNumber: { scopeKey: 'global', versionNumber: 1 } }, update: { loanDays: 14, renewLimit: 1, renewDays: 7, maxActiveLoans: 5 }, create: { scopeKey: 'global', versionNumber: 1, effectiveFrom: new Date('2020-01-01'), loanDays: 14, renewLimit: 1, renewDays: 7, maxActiveLoans: 5, overdueFinePerDay: 5000, holdDays: 3 } });
+  assert.equal((await call('/circulation/loans/copies?q=UX')).status, 401);
+  assert.equal((await call('/circulation/loans/copies?q=UX', reader.cookie)).status, 403);
+  assert.equal((await call('/circulation/borrowers?q=UX', admin.cookie)).status, 403);
+  const options = await call('/circulation/loans/copies?q=UX-COPY-EXACT', collector.cookie);
+  assert.equal(options.status, 200); assert.equal(options.data[0].id, copy.id); assert.ok(options.data.length <= 15);
+  const borrowers = await call('/circulation/borrowers?q=UX-CARD-EXACT', collector.cookie);
+  assert.equal(borrowers.data.length, 1); assert.equal(borrowers.data[0].id, reader.id); assert.equal(borrowers.data[0].cardStatus, 'active'); assert.equal(borrowers.data[0].activeLoanCount, 0);
+  const attempts = await Promise.all([1, 2].map(() => call('/circulation/loans', collector.cookie, { copyId: copy.id, borrowerId: reader.id })));
+  assert.deepEqual(attempts.map(r => r.status).sort(), [201, 400]);
+  const loan = attempts.find(r => r.status === 201).data;
+  assert.equal(loan.renewLimit, 1); assert.equal(loan.renewalBlockedReason, null);
+  const own = await call('/me/loans', reader.cookie);
+  assert.equal(own.data.total, 1);
+  assert.equal((await call('/me/loans', other.cookie)).data.total, 0);
+  const searched = await call('/circulation/loans?q=needle&sort=due_asc&pageSize=1', collector.cookie);
+  assert.equal(searched.data.total, 1); assert.equal(searched.data.items[0].id, loan.id);
+  assert.equal((await call('/circulation/loans?sort=bad', collector.cookie)).status, 400);
+  assert.equal((await call('/me/card/activity')).status, 401);
+  const activity = (await call('/me/card/activity', reader.cookie)).data;
+  assert.equal(activity.activeLoanCount, 1); assert.equal(activity.events.length, 1); assert.equal(activity.events[0].reason, 'OWN EVENT');
+  assert.equal((await call('/me/card/activity', admin.cookie)).data.events.length, 0);
+  const otherCopy = await db.copy.create({ data: { code: 'UX-OTHER-COPY', editionId: edition.id, status: 'on_loan' } });
+  const otherLoan = await db.loan.create({ data: { copyId: otherCopy.id, borrowerId: other.id, dueAt: new Date(Date.now() + 86400000 * 10), loanDays: 14, renewLimit: 1, renewDays: 7, overdueFinePerDay: 5000 } });
+  const ownNotification = await db.notification.create({ data: { accountId: reader.id, loanId: loan.id, dedupeKey: randomUUID(), subject: 'own', body: 'own', status: 'skipped' } });
+  const otherNotification = await db.notification.create({ data: { accountId: other.id, loanId: otherLoan.id, dedupeKey: randomUUID(), subject: 'private other', body: 'private other', status: 'skipped' } });
+  const notifications = (await call('/me/notifications', reader.cookie)).data;
+  assert.equal(notifications.total, 1); assert.equal(notifications.unreadCount, 1); assert.equal(notifications.items[0].id, ownNotification.id);
+  assert.equal((await call('/me/notifications/read', reader.cookie, { ids: ['invalid'] })).status, 400);
+  const reads = await Promise.all([1, 2].map(() => call('/me/notifications/read', reader.cookie, { ids: [ownNotification.id, otherNotification.id] })));
+  assert.ok(reads.every(r => r.status === 204), 'markRead must return empty 204 compatible with the fetch client');
+  assert.equal((await call('/me/notifications', reader.cookie)).data.unreadCount, 0);
+  assert.equal((await db.notification.findUnique({ where: { id: otherNotification.id } })).readAt, null);
+  assert.equal((await call('/me/workspace')).status, 401);
+  assert.deepEqual((await call('/me/workspace', reader.cookie)).data, []);
+  assert.deepEqual((await call('/me/workspace', admin.cookie)).data, []);
+  const catalogTasks = (await call('/me/workspace', cataloger.cookie)).data;
+  assert.ok(catalogTasks.every(task => task.to.startsWith('/catalog/records')));
+  const collectorTasks = (await call('/me/workspace', collector.cookie)).data;
+  assert.ok(collectorTasks.some(task => task.to.startsWith('/circulation/loans')));
+  assert.ok(!collectorTasks.some(task => task.to.startsWith('/catalog/records')));
+  assert.ok((await call('/me/workspace', manager.cookie)).data.some(task => task.to.includes('status=pending')));
+  const renewals = await Promise.all([1, 2].map(() => call(`/circulation/loans/${loan.id}/renew`, collector.cookie, {})));
+  assert.deepEqual(renewals.map(r => r.status).sort(), [201, 400]);
+  assert.equal((await db.loanRenewal.count({ where: { loanId: loan.id } })), 1);
+  const blocked = (await call('/me/loans', reader.cookie)).data.items[0];
+  assert.ok(blocked.renewalBlockedReason); assert.equal(blocked.renewCount, 1);
+  const returns = await Promise.all([1, 2].map(() => call(`/circulation/loans/${loan.id}/return`, collector.cookie, {})));
+  assert.deepEqual(returns.map(r => r.status).sort(), [201, 400]);
+  assert.equal((await call('/me/card/activity', reader.cookie)).data.activeLoanCount, 0);
+  console.log(`PASS UX PostgreSQL: scan/pickers/filter/sort; notification ownership/read retry; card ownership; workspace roles; concurrent borrow/renew/return (${schema})`);
+}
+main().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => { if (app) app.kill(); await db.$disconnect(); });

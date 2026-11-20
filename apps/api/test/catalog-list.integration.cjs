@@ -1,0 +1,44 @@
+// Isolated schema; exercises staff list query and metadata against PostgreSQL.
+const assert = require('node:assert/strict');
+const { randomUUID } = require('node:crypto');
+const { readFileSync, existsSync } = require('node:fs');
+const { resolve } = require('node:path');
+const { spawnSync } = require('node:child_process');
+const root = resolve(__dirname, '../../..');
+require('ts-node').register({ project: resolve(root, 'apps/api/tsconfig.json'), transpileOnly: true });
+const { PrismaClient } = require('@prisma/client');
+const { RecordsService } = require('../src/modules/catalog/records.service');
+const { recordListQuerySchema } = require('@thu-vien/shared');
+const envFile = resolve(root, '.env');
+const configured = process.env.DATABASE_URL || (existsSync(envFile) ? readFileSync(envFile, 'utf8').match(/^DATABASE_URL=["']?([^\r\n"']+)/m)?.[1] : null);
+assert.ok(configured, 'DATABASE_URL is required');
+const database = new URL(configured);
+database.searchParams.set('schema', `catalog_test_${Date.now()}`);
+const env = { ...process.env, DATABASE_URL: database.toString() };
+const migrated = spawnSync(process.execPath, [resolve(root, 'node_modules/prisma/build/index.js'), 'migrate', 'deploy', '--schema', 'apps/api/prisma/schema.prisma'], { cwd: root, env, encoding: 'utf8' });
+assert.equal(migrated.status, 0, migrated.stderr);
+const db = new PrismaClient({ datasources: { db: { url: database.toString() } } });
+const service = new RecordsService(db, { now: () => new Date() });
+async function main() {
+  const publisher = await db.publisher.create({ data: { code: randomUUID(), name: 'Publisher fixture' } });
+  const earlier = new Date('2020-01-01T00:00:00Z');
+  const later = new Date('2021-01-01T00:00:00Z');
+  const first = await db.work.create({ data: { title: 'Alpha record', author: 'Fixture Author', status: 'draft', rejectReason: 'Please add metadata', createdAt: earlier, updatedAt: earlier, editions: { create: { isbn: 'fixture-isbn-1', publishYear: 2020, publisherId: publisher.id } } } });
+  const second = await db.work.create({ data: { title: 'Beta record', author: 'Fixture Author', status: 'pending', createdAt: later, updatedAt: later } });
+  const list = query => service.list(recordListQuerySchema.parse(query));
+  let result = await list({ q: 'fixture author', pageSize: '1', sort: 'title' });
+  assert.equal(result.total, 2);
+  assert.equal(result.items[0].id, first.id);
+  assert.equal((await list({ q: 'fixture author', pageSize: '1', page: '2', sort: 'title' })).items[0].id, second.id);
+  assert.equal((await list({ status: 'draft', rejected: 'true' })).total, 1);
+  assert.equal((await list({ q: 'FIXTURE-ISBN-1' })).items[0].id, first.id);
+  assert.equal((await list({ sort: 'updated' })).items[0].id, second.id);
+  assert.equal((await list({ sort: 'oldest' })).items[0].id, first.id);
+  assert.equal((await list({ q: "' OR 1=1 --" })).total, 0);
+  const detail = await service.get(first.id);
+  assert.equal(detail.editions[0].publisherName, publisher.name);
+  assert.equal(detail.createdAt, earlier.toISOString());
+  assert.equal(detail.updatedAt, earlier.toISOString());
+  console.log('PASS catalog list: query filters, stable pagination, sorting, ISBN search and safe metadata');
+}
+main().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => db.$disconnect());

@@ -1,0 +1,22 @@
+# Quy tắc API — apps/api/src/modules/**
+
+- Validate body/query/params bằng Zod qua pipe; chuyển lỗi về cấu trúc ổn định, không lộ stack trace.
+- DTO đầu ra là danh sách trường cho phép; không trả passwordHash, session secret hoặc reset token.
+- Shared schema dùng kiểm tra hình dạng; service kiểm tra quyền, tồn tại bản ghi, trạng thái và chính sách.
+- Phân quyền trên mỗi endpoint và tài nguyên (chủ sở hữu, vai trò, quyền); không tin role/accountId gửi từ client.
+- Tài khoản hỗ trợ nhiều vai trò nếu quy chế cho phép. Admin quản lý tài khoản, không mặc nhiên có quyền phê duyệt nghiệp vụ.
+- Dùng mật khẩu hash thích hợp như Argon2id; không lưu mật khẩu rõ hoặc dùng dữ liệu đăng nhập mẫu trong production.
+- Ưu tiên phiên máy chủ với cookie HttpOnly, Secure ở production, SameSite phù hợp; có CSRF protection cho request thay đổi dữ liệu, CORS allowlist, rate limit đăng nhập/reset.
+- Reset mật khẩu: token ngẫu nhiên, lưu hash, hết hạn, dùng một lần; phản hồi không tiết lộ tài khoản có tồn tại. Đổi/reset phải có chiến lược thu hồi phiên.
+- Trạng thái bắt buộc đổi mật khẩu được chặn ở API, chỉ cho các thao tác cần thiết để đổi/đăng xuất.
+- Lưu văn bản gốc đã validate; không HTML-escape toàn bộ dữ liệu trước khi lưu PostgreSQL hoặc trả JSON.
+- Ảnh/tệp: giới hạn dung lượng, kiểm tra MIME và nội dung, tên lưu do máy chủ tạo, không tin đường dẫn client. Quyền đọc tài liệu kiểm tra mỗi lần tải.
+- Timestamp lưu UTC; ngày nghiệp vụ tính theo Asia/Ho_Chi_Minh. common/clock cung cấp giờ có thể thay trong test.
+- Tiền VND dùng integer/Decimal có quy tắc làm tròn, không dùng float cho tính tiền.
+- Cho mượn: transaction bao gồm kiểm tra thẻ/hạn mức/bản sao và tạo giao dịch; chống hai người mượn cùng bản sao bằng khóa/constraint phù hợp.
+- Hạn mức cũng phải chống hai giao dịch đồng thời của cùng bạn đọc; không chỉ khóa bản sao.
+- Trả sách, miễn giảm, thu tiền, phân bổ đặt trước có transaction và bảo vệ lặp request; không thu hoặc ghi phạt hai lần.
+- Email không gửi bên trong transaction. Ghi outbox cùng transaction, worker retry với khóa chống trùng; cron nhiều instance không phát nhắc hạn lặp.
+- Audit ghi người thực hiện, hành động, đối tượng, thời điểm, lý do khi cần; không ghi mật khẩu hoặc nội dung tệp.
+- Danh sách có phân trang, giới hạn page size, sort allowlist và thứ tự phụ ổn định theo id.
+- Test API tối thiểu: 401/403, truy cập hồ sơ người khác, chuyển trạng thái sai, rollback, cạnh tranh đồng thời và retry.

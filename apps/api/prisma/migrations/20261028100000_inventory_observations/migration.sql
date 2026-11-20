@@ -1,0 +1,2 @@
+ALTER TYPE "InventoryResult" ADD VALUE IF NOT EXISTS 'unexpected';
+ALTER TABLE "InventoryItem" ADD COLUMN IF NOT EXISTS "inSnapshot" BOOLEAN NOT NULL DEFAULT true;

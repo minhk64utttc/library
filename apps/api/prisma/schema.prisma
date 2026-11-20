@@ -1,0 +1,650 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  reader
+  circulation
+  cataloging
+  inventory
+  digital
+  manager
+  admin
+}
+
+enum AccountStatus {
+  active
+  disabled
+}
+
+enum LibraryCardStatus {
+  active
+  locked
+}
+
+enum RecordStatus {
+  draft
+  pending
+  approved
+  published
+  withdrawn
+}
+
+enum CopyStatus {
+  processing
+  available
+  on_loan
+  reserved
+  damaged
+  lost
+  pending_search
+  withdrawn
+}
+
+enum LoanStatus {
+  active
+  returned
+  lost
+}
+
+enum ReservationStatus {
+  waiting
+  ready_for_pickup
+  fulfilled
+  cancelled
+  expired
+}
+
+enum FineStatus {
+  unpaid
+  paid
+  waived
+}
+
+enum FineWaiverStatus {
+  pending
+  approved
+  rejected
+}
+
+enum NotificationStatus {
+  pending
+  processing
+  sent
+  skipped
+  failed
+}
+
+enum DigitalSubmissionStatus {
+  new_submission
+  under_review
+  need_more_info
+  accepted
+  published
+}
+
+enum DigitalAccessLevel {
+  public
+  members_only
+  campus_only
+  restricted
+}
+
+enum IncidentStatus {
+  new
+  need_info
+  under_review
+  resolved
+}
+
+enum IncidentKind {
+  reported_lost
+  damaged
+  other
+}
+
+enum IncidentDecision {
+  no_change
+  confirmed_lost
+  confirmed_damaged
+}
+
+model Account {
+  id                 String        @id @default(uuid())
+  email              String        @unique
+  passwordHash       String
+  mustChangePassword Boolean       @default(false)
+  status             AccountStatus @default(active)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  roles        AccountRole[]
+  profile      Profile?
+  libraryCard  LibraryCard?
+  cardEvents   LibraryCardEvent[] @relation("LibraryCardActor")
+  finePayments FinePayment[] @relation("FineCollector")
+  requestedFineWaivers FineWaiverRequest[] @relation("FineWaiverRequester")
+  decidedFineWaivers FineWaiverRequest[] @relation("FineWaiverDecider")
+  policyVersions PolicyVersion[]
+  notifications Notification[]
+  digitalSubmissions DigitalSubmission[] @relation("DigitalSubmitter")
+  digitalFiles DigitalFileVersion[] @relation("DigitalFileUploader")
+  digitalEvents DigitalSubmissionEvent[]
+  auditEvents AuditEvent[]
+  loanRenewals LoanRenewal[] @relation("LoanRenewalActor")
+  sessions     Session[]
+  loans        Loan[]
+  reservations Reservation[]
+  reportedIncidents Incident[] @relation("IncidentReporter")
+  decidedIncidents  Incident[] @relation("IncidentDecider")
+  incidentEvents    IncidentEvent[]
+  inventoryRuns    InventoryRun[]
+  inventoryEvents  InventoryEvent[]
+}
+
+model AccountRole {
+  accountId String
+  role      Role
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@id([accountId, role])
+}
+
+model Profile {
+  accountId   String  @id
+  fullName    String
+  phone       String?
+  contactEmail String?
+  readerGroup String  @default("student")
+  reminderEmailEnabled Boolean @default(true)
+  photoStorageKey String?
+  account     Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+}
+
+model LibraryCard {
+  id          String            @id @default(uuid())
+  accountId   String            @unique
+  cardNumber  String            @unique
+  status      LibraryCardStatus @default(active)
+  expiresAt   DateTime
+  lockedAt    DateTime?
+  lockReason  String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id])
+  events  LibraryCardEvent[]
+
+  @@index([status, expiresAt])
+}
+
+model LibraryCardEvent {
+  id                String   @id @default(uuid())
+  cardId            String
+  actorId           String
+  action            String
+  reason            String?
+  previousExpiresAt DateTime?
+  newExpiresAt      DateTime?
+  createdAt         DateTime @default(now())
+
+  card  LibraryCard @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  actor Account     @relation("LibraryCardActor", fields: [actorId], references: [id])
+
+  @@index([cardId, createdAt])
+}
+
+model Session {
+  id        String    @id @default(uuid())
+  accountId String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId])
+}
+
+model Publisher {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  name      String
+  address   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  editions Edition[]
+}
+
+model Work {
+  id             String       @id @default(uuid())
+  title          String
+  author         String?
+  subject        String?
+  classification String?
+  status         RecordStatus @default(draft)
+  submittedAt    DateTime?
+  decidedAt      DateTime?
+  decidedById    String?
+  rejectReason   String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  editions Edition[]
+
+  @@index([status])
+}
+
+model Edition {
+  id          String   @id @default(uuid())
+  workId      String
+  publisherId String?
+  isbn        String?  @unique
+  language    String?
+  publishYear Int?
+  editionNo   Int?
+  callNumber  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  work         Work          @relation(fields: [workId], references: [id], onDelete: Cascade)
+  publisher    Publisher?    @relation(fields: [publisherId], references: [id])
+  copies       Copy[]
+  reservations Reservation[]
+
+  @@index([workId])
+}
+
+model Location {
+  id     String @id @default(uuid())
+  code   String @unique
+  name   String
+  copies Copy[]
+  inventoryRuns InventoryRun[]
+}
+
+model Copy {
+  id         String     @id @default(uuid())
+  code       String     @unique
+  editionId  String
+  locationId String?
+  status     CopyStatus @default(processing)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  edition  Edition   @relation(fields: [editionId], references: [id], onDelete: Cascade)
+  location Location? @relation(fields: [locationId], references: [id])
+  loans    Loan[]
+  incidents Incident[]
+
+  inventoryItems InventoryItem[]
+
+  @@index([editionId])
+  @@index([status])
+}
+
+model Policy {
+  id                String   @id @default("default")
+  loanDays          Int      @default(30)
+  renewLimit        Int      @default(1)
+  renewDays         Int      @default(7)
+  maxActiveLoans    Int      @default(5)
+  overdueFinePerDay Int      @default(5000)
+  holdDays          Int      @default(3)
+  updatedAt         DateTime @updatedAt
+}
+
+model PolicyVersion {
+  id                String   @id @default(uuid())
+  scopeKey          String   @default("global")
+  readerGroup       String?
+  materialType      String?
+  branchCode        String?
+  versionNumber     Int
+  effectiveFrom     DateTime
+  loanDays          Int
+  renewLimit        Int
+  renewDays         Int
+  maxActiveLoans    Int
+  overdueFinePerDay Int
+  holdDays          Int
+  serviceOpenDays   Int[]    @default([1, 2, 3, 4, 5])
+  serviceOpensAt     String   @default("08:00")
+  serviceClosesAt    String   @default("17:00")
+  createdById       String?
+  createdAt         DateTime @default(now())
+
+  createdBy Account? @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  loans     Loan[]
+
+  @@unique([scopeKey, versionNumber])
+  @@unique([scopeKey, effectiveFrom])
+  @@index([scopeKey, effectiveFrom])
+}
+
+model Loan {
+  id         String     @id @default(uuid())
+  copyId     String
+  borrowerId String
+  status     LoanStatus @default(active)
+  borrowedAt DateTime   @default(now())
+  dueAt      DateTime
+  returnedAt DateTime?
+  renewCount Int        @default(0)
+  loanDays   Int
+  renewLimit Int
+  renewDays  Int
+  overdueFinePerDay Int
+  policyVersionId String?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  copy     Copy    @relation(fields: [copyId], references: [id])
+  borrower Account @relation(fields: [borrowerId], references: [id])
+  fine     Fine?
+  incidents Incident[]
+  notifications Notification[]
+  renewals LoanRenewal[]
+  policyVersion PolicyVersion? @relation(fields: [policyVersionId], references: [id], onDelete: SetNull)
+
+  @@index([copyId])
+  @@index([borrowerId])
+  @@index([status])
+  @@index([policyVersionId])
+}
+
+model LoanRenewal {
+  id             String   @id @default(uuid())
+  loanId         String
+  previousDueAt  DateTime
+  dueAt          DateTime
+  renewedById    String?
+  channel        String   @default("staff")
+  createdAt      DateTime @default(now())
+
+  loan      Loan     @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  renewedBy Account? @relation("LoanRenewalActor", fields: [renewedById], references: [id], onDelete: SetNull)
+
+  @@index([loanId, createdAt])
+}
+
+model Notification {
+  id             String             @id @default(uuid())
+  accountId      String
+  loanId         String
+  dedupeKey      String             @unique
+  subject        String
+  body           String
+  recipientEmail String?
+  status         NotificationStatus @default(pending)
+  attemptCount   Int                @default(0)
+  nextAttemptAt  DateTime           @default(now())
+  lastError      String?
+  createdAt      DateTime           @default(now())
+  sentAt         DateTime?
+  readAt         DateTime?
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  loan    Loan    @relation(fields: [loanId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt])
+  @@index([accountId, createdAt])
+  @@index([accountId, readAt])
+}
+
+model DigitalSubmission {
+  id                   String                  @id @default(uuid())
+  submissionCode       String                  @unique
+  submitterId          String
+  title                String
+  abstract             String
+  author               String
+  department           String?
+  publishedYear        Int?
+  license              String
+  rightsConfirmed      Boolean                 @default(false)
+  status               DigitalSubmissionStatus @default(new_submission)
+  accessLevel          DigitalAccessLevel?
+  reviewNote           String?
+  publicationNote      String?
+  submittedAt          DateTime                @default(now())
+  acceptedAt           DateTime?
+  publishedAt          DateTime?
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+
+  submitter Account                  @relation("DigitalSubmitter", fields: [submitterId], references: [id])
+  files     DigitalFileVersion[]
+  events    DigitalSubmissionEvent[]
+
+  @@index([submitterId, createdAt])
+  @@index([status, submittedAt])
+}
+
+model DigitalFileVersion {
+  id             String   @id @default(uuid())
+  submissionId   String
+  uploaderId     String
+  storageKey     String   @unique
+  originalName   String
+  mimeType       String
+  sizeBytes      Int
+  checksumSha256 String
+  versionNumber  Int
+  createdAt      DateTime @default(now())
+
+  submission DigitalSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  uploader   Account           @relation("DigitalFileUploader", fields: [uploaderId], references: [id])
+
+  @@unique([submissionId, versionNumber])
+  @@index([submissionId, createdAt])
+}
+
+model DigitalSubmissionEvent {
+  id             String   @id @default(uuid())
+  submissionId   String
+  actorId        String
+  action         String
+  note           String?
+  accessLevel    DigitalAccessLevel?
+  createdAt      DateTime @default(now())
+
+  submission DigitalSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  actor      Account           @relation(fields: [actorId], references: [id])
+
+  @@index([submissionId, createdAt])
+}
+
+model AuditEvent {
+  id         String   @id @default(uuid())
+  actorId    String?
+  action     String
+  targetType String
+  targetId   String?
+  outcome    String
+  createdAt  DateTime @default(now())
+
+  actor Account? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt, id])
+  @@index([actorId, createdAt])
+  @@index([targetType, targetId, createdAt])
+}
+
+model Fine {
+  id        String     @id @default(uuid())
+  loanId    String     @unique
+  amount    Int
+  status    FineStatus @default(unpaid)
+  createdAt DateTime   @default(now())
+
+  loan Loan @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  payments FinePayment[]
+  waiverRequests FineWaiverRequest[]
+}
+
+model FinePayment {
+  id             String   @id @default(uuid())
+  fineId         String
+  amount         Int
+  remainingAfter Int
+  idempotencyKey String   @unique
+  receiptNumber  String   @unique
+  receivedById   String
+  receivedAt     DateTime @default(now())
+
+  fine       Fine    @relation(fields: [fineId], references: [id])
+  receivedBy Account @relation("FineCollector", fields: [receivedById], references: [id])
+
+  @@index([fineId, receivedAt])
+}
+
+model FineWaiverRequest {
+  id                String           @id @default(uuid())
+  fineId            String
+  requestedById     String
+  decidedById       String?
+  requestedAmount   Int
+  approvedAmount    Int?
+  reason            String
+  decisionReason    String?
+  status            FineWaiverStatus @default(pending)
+  createdAt         DateTime         @default(now())
+  decidedAt         DateTime?
+
+  fine        Fine     @relation(fields: [fineId], references: [id])
+  requestedBy Account  @relation("FineWaiverRequester", fields: [requestedById], references: [id])
+  decidedBy   Account? @relation("FineWaiverDecider", fields: [decidedById], references: [id])
+
+  @@index([fineId, status])
+  @@index([status, createdAt])
+}
+
+model Reservation {
+  id         String            @id @default(uuid())
+  editionId  String
+  borrowerId String
+  status     ReservationStatus @default(waiting)
+  readyAt    DateTime?
+  expiresAt  DateTime?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  edition  Edition @relation(fields: [editionId], references: [id], onDelete: Cascade)
+  borrower Account @relation(fields: [borrowerId], references: [id])
+
+  @@index([editionId, status])
+  @@index([borrowerId])
+}
+
+model Incident {
+  id             String            @id @default(uuid())
+  copyId         String
+  loanId         String?
+  reportedById   String
+  decidedById    String?
+  kind           IncidentKind
+  copyStatusAtReport CopyStatus
+  status         IncidentStatus    @default(new)
+  description    String
+  evidence       String?
+  requestInfo    String?
+  decision       IncidentDecision?
+  decisionReason String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  decidedAt      DateTime?
+
+  copy       Copy     @relation(fields: [copyId], references: [id])
+  loan       Loan?    @relation(fields: [loanId], references: [id])
+  reportedBy Account  @relation("IncidentReporter", fields: [reportedById], references: [id])
+  decidedBy  Account? @relation("IncidentDecider", fields: [decidedById], references: [id])
+  events     IncidentEvent[]
+
+  @@index([copyId, status])
+  @@index([createdAt, id])
+}
+
+model IncidentEvent {
+  id         String   @id @default(uuid())
+  incidentId String
+  actorId    String
+  action     String
+  note       String?
+  createdAt  DateTime @default(now())
+
+  incident Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  actor    Account  @relation(fields: [actorId], references: [id])
+
+  @@index([incidentId, createdAt])
+}
+
+model InventoryRun {
+  id          String   @id @default(uuid())
+  name        String
+  locationId  String
+  createdById String
+  createdAt   DateTime @default(now())
+  closedAt    DateTime?
+  location    Location @relation(fields: [locationId], references: [id])
+  createdBy   Account  @relation(fields: [createdById], references: [id])
+  items       InventoryItem[]
+  events      InventoryEvent[]
+
+  @@index([locationId, closedAt])
+}
+
+enum InventoryResult {
+  unexpected
+  unchecked
+  matched
+  misplaced
+  on_loan
+  moved
+  changed
+  pending_search
+  found
+  lost
+  excluded
+}
+
+model InventoryItem {
+  id                 String @id @default(uuid())
+  runId              String
+  copyId             String
+  inSnapshot         Boolean @default(true)
+  expectedLocationId String?
+  snapshotStatus     CopyStatus
+  snapshotUpdatedAt  DateTime
+  previousStatus     CopyStatus?
+  scannedLocationId  String?
+  scannedAt          DateTime?
+  result             InventoryResult @default(unchecked)
+  note               String?
+  run                InventoryRun @relation(fields: [runId], references: [id])
+  copy               Copy @relation(fields: [copyId], references: [id])
+
+  @@unique([runId, copyId])
+  @@index([runId, result])
+}
+
+model InventoryEvent {
+  id        String @id @default(uuid())
+  runId     String
+  actorId   String
+  copyId    String?
+  action    String
+  note      String?
+  createdAt DateTime @default(now())
+  run       InventoryRun @relation(fields: [runId], references: [id])
+  actor     Account @relation(fields: [actorId], references: [id])
+
+  @@index([runId, createdAt])
+}

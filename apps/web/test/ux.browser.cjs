@@ -1,0 +1,98 @@
+// UI interaction checks with explicit API fixtures. Run with PLAYWRIGHT_MODULE_PATH set
+// to an installed Playwright module; no browser-test dependency is added to the app.
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE_PATH || 'playwright');
+const assert = require('node:assert/strict');
+const base = process.env.UX_WEB_URL || 'http://localhost:5173';
+const path = require('node:path');
+const fs = require('node:fs/promises');
+let activeBrowser;
+
+async function main() {
+  const browser = await chromium.launch({ channel: 'msedge', headless: true });
+  activeBrowser = browser;
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  let profile = { id: 'qa', email: 'qa@example.test', fullName: 'QA Reader', phone: '', contactEmail: '', reminderEmailEnabled: true, photoUrl: null, libraryCard: { cardNumber: 'QA-100', status: 'active', expiresOn: '2027-12-31' }, roles: ['reader', 'cataloging'], status: 'active', mustChangePassword: false };
+  let unread = true;
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url());
+    if (!url.pathname.startsWith('/api/')) return route.continue();
+    let data;
+    if (url.pathname === '/api/auth/me') data = { ...profile };
+    else if (url.pathname === '/api/me/profile') {
+      if (route.request().method() === 'PATCH') profile = { ...profile, ...route.request().postDataJSON() };
+      data = profile;
+    } else if (url.pathname === '/api/me/card/activity') data = { activeLoanCount: 2, events: [] };
+    else if (url.pathname === '/api/me/workspace') data = [{ label: 'QA pending work', count: 3, to: '/catalog/records?status=pending' }];
+    else if (url.pathname === '/api/me/notifications/read') { unread = false; return route.fulfill({ status: 204 }); }
+    else if (url.pathname === '/api/me/notifications') data = { items: [{ id: '00000000-0000-4000-a000-000000000001', subject: 'QA reminder', body: 'QA due date reminder', readAt: unread ? null : '2026-11-20T00:00:00Z' }], unreadCount: unread ? 1 : 0, total: 1, page: 1, pageSize: 5 };
+    else if (url.pathname === '/api/catalog/records') data = { items: [{ id: 'qa-record', title: 'QA Catalog', author: 'QA Author', subject: null, classification: null, status: 'pending', rejectReason: null, createdAt: '2026-11-01T00:00:00Z', updatedAt: '2026-11-20T00:00:00Z', editions: [] }], total: 1, page: 1, pageSize: 20 };
+    else if (url.pathname === '/api/public/records/facets') data = { subjects: [], authors: [], languages: [], publishers: [] };
+    else data = { items: [], total: 0, page: 1, pageSize: 20 };
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) });
+  });
+  await page.goto(`${base}/me/profile`);
+  await page.locator('input[name="fullName"]').waitFor();
+  await page.locator('.notification-bell summary').click();
+  await page.locator('.notification-panel > button').click();
+  await page.waitForFunction(() => !document.querySelector('.notification-count'));
+  await page.locator('.notification-bell summary').click();
+  const save = page.locator('button[type="submit"]');
+  assert.equal(await save.isDisabled(), true);
+  await page.locator('input[name="fullName"]').fill('QA Edited');
+  assert.equal(await save.isEnabled(), true);
+  await page.locator('form .profile-actions button[type="button"]').click();
+  assert.equal(await save.isDisabled(), true);
+  await page.locator('input[name="fullName"]').fill('');
+  await page.locator('.profile-tabs button').nth(3).click();
+  await save.click();
+  assert.equal(await page.locator('.profile-tabs button').first().getAttribute('aria-pressed'), 'true');
+  await page.locator('input[name="fullName"]').fill('QA Updated');
+  await save.click();
+  await page.waitForFunction(() => document.querySelector('button[type="submit"]').disabled);
+  await page.locator('input[name="fullName"]').fill('Unsaved edit');
+  await page.locator('.reader-layout__brand').click();
+  await page.locator('dialog[open]').waitFor();
+  await page.keyboard.press('Escape');
+  assert.ok(page.url().includes('/me/profile'));
+  await page.locator('form .profile-actions button[type="button"]').click();
+  await page.locator('.profile-tabs button').nth(2).click();
+  assert.equal(await page.locator('a[href="/me/security"]').count(), 1);
+  const output = path.resolve('artifacts/ux-review');
+  await fs.mkdir(output, { recursive: true });
+  await page.screenshot({ path: path.join(output, 'profile-desktop.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: path.join(output, 'profile-mobile.png'), fullPage: true });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false, 'profile should fit mobile viewport');
+  await page.goto(`${base}/`);
+  await page.locator('.command-trigger').waitFor();
+  await page.keyboard.press('Control+k');
+  await page.locator('.command-dialog[open]').waitFor();
+  await page.locator('.command-dialog input').fill('sach');
+  assert.ok(await page.locator('.command-dialog li').count() > 0);
+  await page.keyboard.press('Escape');
+  await page.goto(`${base}/search`);
+  await page.locator('.public-search__quick input').waitFor();
+  await page.locator('.public-search__quick input').fill('toan roi rac');
+  await page.locator('.public-search__quick button[type="submit"]').click();
+  await page.waitForURL('**/search?*q=toan*');
+  assert.ok(page.url().includes('q=toan'));
+  await page.screenshot({ path: path.join(output, 'search-mobile.png'), fullPage: true });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false, 'search should fit mobile viewport');
+  profile.roles = ['manager'];
+  await page.goto(`${base}/catalog/records`);
+  await page.locator('.records__more summary').click();
+  await page.locator('.records__more button').click();
+  await page.locator('dialog[open] textarea').waitFor();
+  assert.equal(await page.locator('dialog[open] button[type="submit"]').isDisabled(), true);
+  await page.locator('dialog[open] textarea').fill('QA required reason');
+  assert.equal(await page.locator('dialog[open] button[type="submit"]').isEnabled(), true);
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('dialog[open]').count(), 0);
+  await page.screenshot({ path: path.join(output, 'catalog-mobile.png'), fullPage: true });
+  assert.deepEqual(errors, []);
+  await browser.close();
+  console.log('PASS browser: profile dirty/save/undo/leave dialog/security tabs; Ctrl+K; URL search; catalog rejection required reason/Escape; mobile layout; no page errors. API fixtures used.');
+}
+main().catch(async error => { console.error(error); await activeBrowser?.close(); process.exitCode = 1; });
