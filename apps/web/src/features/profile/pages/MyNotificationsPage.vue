@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { apiFetch } from '@/shared/api/client';
 
@@ -11,18 +11,34 @@ const router = useRouter();
 const result = ref<ReminderPage | null>(null);
 const error = ref('');
 const loading = ref(false);
+const backgroundRefreshing = ref(false);
+const lastUpdatedAt = ref<Date | null>(null);
+const refreshNotice = ref('');
 const page = computed(() => Math.max(1, Number(route.query.page) || 1));
 const pages = computed(() => Math.max(1, Math.ceil((result.value?.total ?? 0) / (result.value?.pageSize ?? 20))));
+let requestVersion = 0;
+let backgroundRequest = false;
+let refreshTimer: ReturnType<typeof setInterval> | undefined;
 
-async function load(): Promise<void> {
-  loading.value = true;
-  error.value = '';
+async function load(options: { quiet?: boolean } = {}): Promise<void> {
+  const quiet = options.quiet ?? false;
+  if (quiet && (backgroundRequest || loading.value)) return;
+  if (quiet) backgroundRequest = true;
+  const version = ++requestVersion;
+  if (quiet) backgroundRefreshing.value = true;
+  else { loading.value = true; error.value = ''; }
+  refreshNotice.value = '';
   try {
-    result.value = await apiFetch<ReminderPage>(`/me/notifications?page=${page.value}&pageSize=20`);
+    const latest = await apiFetch<ReminderPage>(`/me/notifications?page=${page.value}&pageSize=20`);
+    if (version === requestVersion) { result.value = latest; lastUpdatedAt.value = new Date(); }
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : 'Không tải được thông báo.';
+    if (version === requestVersion) {
+      if (quiet) refreshNotice.value = 'Chưa thể cập nhật thông báo mới. Đang giữ danh sách đã tải trước đó.';
+      else error.value = cause instanceof Error ? cause.message : 'Không tải được thông báo.';
+    }
   } finally {
-    loading.value = false;
+    if (version === requestVersion && !quiet) loading.value = false;
+    if (quiet) { backgroundRefreshing.value = false; backgroundRequest = false; }
   }
 }
 
@@ -30,14 +46,29 @@ function goToPage(nextPage: number): void {
   void router.push({ name: route.meta.workspace ? 'staff-notifications' : 'my-notifications', query: nextPage > 1 ? { page: String(nextPage) } : {} });
 }
 
+function refreshNow(): void { void load({ quiet: true }); }
+function refreshWhenVisible(): void { if (document.visibilityState === 'visible') void load({ quiet: true }); }
+
 watch(page, () => void load(), { immediate: true });
+onMounted(() => {
+  document.addEventListener('visibilitychange', refreshWhenVisible);
+  window.addEventListener('focus', refreshWhenVisible);
+  refreshTimer = window.setInterval(() => { if (document.visibilityState === 'visible') void load({ quiet: true }); }, 15_000);
+});
+onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', refreshWhenVisible);
+  window.removeEventListener('focus', refreshWhenVisible);
+  if (refreshTimer) window.clearInterval(refreshTimer);
+});
 </script>
 
 <template>
   <section class="my-notifications" aria-labelledby="notifications-title">
     <p class="eyebrow">{{ route.meta.workspace ? 'Khu nghiệp vụ thư viện' : 'Cổng bạn đọc' }}</p>
-    <h1 id="notifications-title">Nhắc hạn mượn</h1>
-    <p class="my-notifications__intro">Thông báo được tạo tự động cho tài liệu sắp đến hạn và đã quá hạn.</p>
+    <h1 id="notifications-title">Thông báo của tôi</h1>
+    <p class="my-notifications__intro">Cập nhật về mượn, trả, gia hạn, khoản phạt và nhắc hạn tài liệu.</p>
+    <div class="my-notifications__refresh"><small v-if="lastUpdatedAt" role="status" aria-live="polite">{{ backgroundRefreshing ? 'Đang cập nhật…' : `Cập nhật lúc ${lastUpdatedAt.toLocaleTimeString('vi-VN')}` }}</small><button type="button" :disabled="loading || backgroundRefreshing" @click="refreshNow">Làm mới</button></div>
+    <p v-if="refreshNotice" class="my-notifications__error" role="status">{{ refreshNotice }}</p>
     <p v-if="error" class="my-notifications__error" role="alert">{{ error }}</p>
     <p v-if="loading" class="my-notifications__empty" role="status">Đang tải thông báo…</p>
     <template v-else-if="result">
@@ -61,6 +92,7 @@ watch(page, () => void load(), { immediate: true });
 <style scoped>
 .my-notifications h1 { margin: 5px 0 7px; color: var(--navy-deep); font-size: clamp(1.5rem, 3vw, 2rem); }
 .my-notifications__intro, .my-notifications__count { color: var(--muted); font-size: .86rem; }
+.my-notifications__refresh { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0; color: var(--muted); font-size: .76rem; }
 .my-notifications__list { display: grid; gap: 12px; margin-top: 20px; }
 .my-notification { padding: 16px 18px; background: #fbfcfe; border: 1px solid var(--line); border-left: 3px solid var(--amber); border-radius: 10px; }
 .my-notification__top { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }

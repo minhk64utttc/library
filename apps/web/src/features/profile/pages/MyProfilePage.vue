@@ -69,14 +69,17 @@ async function load(): Promise<void> {
 async function submit(): Promise<void> {
   if (saving.value) return;
   if (!form.fullName.trim()) { activeTab.value = 'contact'; error.value = 'Vui lòng nhập họ và tên trước khi lưu.'; return; }
+  if (form.fullName.trim().length > 200) { activeTab.value = 'contact'; error.value = 'Họ và tên không được vượt quá 200 ký tự.'; return; }
+  if (form.phone.trim().length > 20) { activeTab.value = 'contact'; error.value = 'Số điện thoại không được vượt quá 20 ký tự.'; return; }
+  if (form.contactEmail.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.contactEmail.trim())) { activeTab.value = 'contact'; error.value = 'Email liên hệ chưa đúng định dạng.'; return; }
   saving.value = true;
   error.value = '';
   notice.value = '';
   try {
     profile.value = await saveMyProfile({
-      fullName: form.fullName,
-      phone: form.phone,
-      contactEmail: form.contactEmail,
+      fullName: form.fullName.trim(),
+      phone: form.phone.trim(),
+      contactEmail: form.contactEmail.trim(),
       reminderEmailEnabled: form.reminderEmailEnabled,
     });
     resetForm();
@@ -190,9 +193,9 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
         </div>
         <p v-if="notice" class="reader-profile__success" role="status">{{ notice }}</p>
         <p v-if="error" role="alert">{{ error }}</p>
-        <form @submit.prevent="submit">
+        <form novalidate @submit.prevent="submit">
           <label v-show="activeTab === 'contact'">Họ và tên
-            <input v-model="form.fullName" name="fullName" autocomplete="name" :disabled="activeTab !== 'contact'" required maxlength="200" />
+            <input v-model="form.fullName" name="fullName" autocomplete="name" :disabled="activeTab !== 'contact'" maxlength="200" :aria-invalid="Boolean(error && !form.fullName.trim())" />
           </label>
           <label>Email liên hệ
             <input v-model="form.contactEmail" name="contactEmail" type="email" autocomplete="email" maxlength="254" placeholder="Địa chỉ nhận thông tin từ thư viện" />

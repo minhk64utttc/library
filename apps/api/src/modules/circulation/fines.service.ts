@@ -50,6 +50,7 @@ type WaiverWithRelations = Prisma.FineWaiverRequestGetPayload<{ include: typeof 
 export interface FineListQuery extends PageQuery {
   status?: FineStatus;
   borrowerId?: string;
+  q?: string;
 }
 
 export interface FineWaiverListQuery extends PageQuery {
@@ -60,10 +61,16 @@ export interface FineWaiverListQuery extends PageQuery {
 export class FinesService {
   constructor(private readonly prisma: PrismaService, private readonly clock: Clock) {}
 
-  async list({ page, pageSize, status, borrowerId }: FineListQuery): Promise<Paginated<FineDto>> {
+  async list({ page, pageSize, status, borrowerId, q }: FineListQuery): Promise<Paginated<FineDto>> {
     const where: Prisma.FineWhereInput = {
       ...(status ? { status } : {}),
       ...(borrowerId ? { loan: { borrowerId } } : {}),
+      ...(q ? { OR: [
+        { loan: { copy: { code: { contains: q, mode: 'insensitive' } } } },
+        { loan: { borrower: { email: { contains: q, mode: 'insensitive' } } } },
+        { loan: { borrower: { profile: { is: { fullName: { contains: q, mode: 'insensitive' } } } } } },
+        { loan: { borrower: { libraryCard: { is: { cardNumber: { contains: q, mode: 'insensitive' } } } } } },
+      ] } : {}),
     };
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.fine.findMany({
@@ -84,7 +91,7 @@ export class FinesService {
     }
     const now = this.clock.now();
     const result = await this.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${idempotencyKey})::bigint)`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${idempotencyKey})::bigint)`;
       await tx.$queryRaw`SELECT id FROM "Fine" WHERE id = ${id} FOR UPDATE`;
       const prior = await tx.finePayment.findUnique({ where: { idempotencyKey }, include: RECEIPT_INCLUDE });
       if (prior) {
@@ -119,7 +126,20 @@ export class FinesService {
       if (amount === totals.remainingAmount) {
         await tx.fine.update({ where: { id }, data: { status: 'paid' } });
       }
-      return tx.finePayment.findUniqueOrThrow({ where: { id: payment.id }, include: RECEIPT_INCLUDE });
+      const result = await tx.finePayment.findUniqueOrThrow({ where: { id: payment.id }, include: RECEIPT_INCLUDE });
+      await tx.notification.create({
+        data: {
+          accountId: result.fine.loan.borrowerId,
+          loanId: result.fine.loanId,
+          dedupeKey: `fine-payment:${result.id}`,
+          subject: 'Đã ghi nhận thanh toán khoản phạt',
+          body: `Thư viện đã ghi nhận ${amount.toLocaleString('vi-VN')} ₫ cho tài liệu “${result.fine.loan.copy.edition.work.title}” (mã cuốn ${result.fine.loan.copy.code}). Biên nhận ${result.receiptNumber}. Còn phải thu ${Math.max(0, totals.remainingAmount - amount).toLocaleString('vi-VN')} ₫.`,
+          recipientEmail: null,
+          status: 'skipped',
+          sentAt: now,
+        },
+      });
+      return result;
     });
 
     return { payment: this.toPaymentDto(result), fine: this.toDto(result.fine) };
@@ -202,7 +222,22 @@ export class FinesService {
         const paidTotal = this.totals(current.fine).paidAmount;
         await tx.fine.update({ where: { id: current.fineId }, data: { status: paidTotal > 0 ? 'paid' : 'waived' } });
       }
-      return tx.fineWaiverRequest.findUniqueOrThrow({ where: { id: updated.id }, include: WAIVER_INCLUDE });
+      const result = await tx.fineWaiverRequest.findUniqueOrThrow({ where: { id: updated.id }, include: WAIVER_INCLUDE });
+      await tx.notification.create({
+        data: {
+          accountId: result.fine.loan.borrowerId,
+          loanId: result.fine.loanId,
+          dedupeKey: `fine-waiver:${result.id}`,
+          subject: input.status === 'approved' ? 'Đề nghị miễn giảm đã được duyệt' : 'Đề nghị miễn giảm chưa được duyệt',
+          body: input.status === 'approved'
+            ? `Thư viện đã duyệt miễn giảm ${result.approvedAmount?.toLocaleString('vi-VN') ?? '0'} ₫ cho khoản phạt tài liệu “${result.fine.loan.copy.edition.work.title}” (mã cuốn ${result.fine.loan.copy.code}).${result.decisionReason ? ` Lý do: ${result.decisionReason}` : ''}`
+            : `Thư viện chưa duyệt đề nghị miễn giảm khoản phạt cho tài liệu “${result.fine.loan.copy.edition.work.title}” (mã cuốn ${result.fine.loan.copy.code}).${result.decisionReason ? ` Lý do: ${result.decisionReason}` : ''}`,
+          recipientEmail: null,
+          status: 'skipped',
+          sentAt: this.clock.now(),
+        },
+      });
+      return result;
     });
     return this.toWaiverDto(request);
   }

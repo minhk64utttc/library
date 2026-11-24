@@ -1,6 +1,7 @@
 import type {
   CopyDto,
   IncidentCreate,
+  IncidentAttachmentDto,
   IncidentDecisionInput,
   IncidentDto,
   IncidentInfo,
@@ -24,6 +25,16 @@ export function searchCopies(code: string): Promise<Paginated<CopyDto>> {
 
 export function createIncident(input: IncidentCreate): Promise<IncidentDto> {
   return apiFetch<IncidentDto>('/incidents', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function uploadIncidentAttachments(id: string, files: File[]): Promise<IncidentAttachmentDto[]> {
+  const body = new FormData();
+  for (const file of files) body.append('files', file);
+  return apiFetch<IncidentAttachmentDto[]>(`/incidents/${encodeURIComponent(id)}/attachments`, { method: 'POST', body });
+}
+
+export function incidentAttachmentUrl(incidentId: string, attachmentId: string): string {
+  return `/api/incidents/${encodeURIComponent(incidentId)}/attachments/${encodeURIComponent(attachmentId)}`;
 }
 
 export function addIncidentInfo(id: string, input: IncidentInfo): Promise<IncidentDto> {

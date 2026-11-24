@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { RouterLink, useRoute, useRouter, type LocationQueryRaw } from 'vue-router';
 import type { Paginated, PublicRecordDto, PublicSearchFacets, PublicSearchQuery } from '@thu-vien/shared';
 import { loadSearchFacets, searchRecords } from '../api';
+import { languageLabel } from '@/shared/language-label';
 
 const route = useRoute();
 const router = useRouter();
@@ -18,16 +19,18 @@ let mobileQuery: MediaQueryList | null = null;
 let filterOpener: HTMLElement | null = null;
 let filterSnapshot: typeof form | null = null;
 const error = ref('');
+const yearRangeError = computed(() => {
+  const invalidYear = (value: string) => value !== '' && (!Number.isInteger(Number(value)) || Number(value) < 0 || Number(value) > 3000);
+  if (invalidYear(form.yearFrom) || invalidYear(form.yearTo)) return 'Nhập năm hợp lệ từ 0 đến 3000.';
+  if (form.yearFrom && form.yearTo && Number(form.yearFrom) > Number(form.yearTo)) return 'Năm bắt đầu phải nhỏ hơn hoặc bằng năm kết thúc.';
+  return '';
+});
 const results = ref<Paginated<PublicRecordDto> | null>(null);
 const facets = ref<PublicSearchFacets>({ subjects: [], authors: [], languages: [], publishers: [] });
 const form = reactive({ q: '', subject: '', author: '', language: '', publisher: '', yearFrom: '', yearTo: '', availableOnly: '', sort: 'relevance' });
 let requestVersion = 0;
 const totalPages = computed(() => Math.max(1, Math.ceil((results.value?.total ?? 0) / 20)));
 const labels: Record<string, string> = { q: 'Từ khóa', subject: 'Chủ đề', author: 'Tác giả', language: 'Ngôn ngữ', publisher: 'Nhà xuất bản', yearFrom: 'Từ năm', yearTo: 'Đến năm', availableOnly: 'Chỉ còn sẵn' };
-function languageLabel(value: string): string {
-  const languages: Record<string, string> = { vi: 'Tiếng Việt', vie: 'Tiếng Việt', en: 'Tiếng Anh', eng: 'Tiếng Anh', fr: 'Tiếng Pháp', fra: 'Tiếng Pháp', fre: 'Tiếng Pháp', zh: 'Tiếng Trung', zho: 'Tiếng Trung', chi: 'Tiếng Trung', ja: 'Tiếng Nhật', jpn: 'Tiếng Nhật', ko: 'Tiếng Hàn', kor: 'Tiếng Hàn', de: 'Tiếng Đức', deu: 'Tiếng Đức', ger: 'Tiếng Đức', ru: 'Tiếng Nga', rus: 'Tiếng Nga' };
-  return languages[value.toLowerCase().split('-')[0] ?? ''] ?? value;
-}
 const activeFilters = computed(() => Object.entries(route.query).filter(([key, value]) => key in labels && value && value !== 'false').map(([key, value]) => ({ key, label: `${labels[key]}${key === 'availableOnly' ? '' : `: ${key === 'language' ? languageLabel(String(value)) : value}`}` })));
 const activeFilterCount = computed(() => activeFilters.value.filter(filter => filter.key !== 'q').length);
 const facetFields = [
@@ -58,12 +61,8 @@ async function loadFromUrl(): Promise<void> {
   } finally { if (version === requestVersion) loading.value = false; }
 }
 function submitSearch(): void {
-  if ([form.yearFrom, form.yearTo].some(value => value !== '' && (!Number.isInteger(Number(value)) || Number(value) < 0 || Number(value) > 3000))) {
-    error.value = 'Nhập năm hợp lệ từ 0 đến 3000.'; return;
-  }
-  if (form.yearFrom && form.yearTo && Number(form.yearFrom) > Number(form.yearTo)) {
-    error.value = 'Năm bắt đầu phải nhỏ hơn hoặc bằng năm kết thúc.'; return;
-  }
+  if (yearRangeError.value) return;
+  error.value = '';
   const query = Object.fromEntries(Object.entries(form).map(([key, value]) => [key, value.trim()]).filter(([, value]) => value !== ''));
   filterSnapshot = null;
   filterDialog.value?.close();
@@ -95,7 +94,7 @@ function removeFilter(key: string): void {
   const query: LocationQueryRaw = { ...route.query, page: '1' }; delete query[key];
   void router.push({ query });
 }
-function clearFilters(): void { void router.push({ name: 'public-search' }); }
+function clearFilters(): void { Object.assign(form, { q: '', subject: '', author: '', language: '', publisher: '', yearFrom: '', yearTo: '', availableOnly: '', sort: 'relevance' }); error.value = ''; void router.push({ name: 'public-search' }); }
 function changePage(page: number): void { void router.push({ query: { ...route.query, page: String(page) } }); }
 function availability(record: PublicRecordDto): number { return record.editions.reduce((sum, edition) => sum + edition.availableCount, 0); }
 function totalCopies(record: PublicRecordDto): number { return record.editions.reduce((sum, edition) => sum + edition.totalCount, 0); }
@@ -142,14 +141,14 @@ onBeforeUnmount(() => { mobileQuery?.removeEventListener('change', updateMobile)
           </select>
           <small v-if="field.key === 'publisher' && !facets.publishers.length" id="publisher-filter-help">{{ facetsLoading ? 'Đang tải nhà xuất bản…' : facetError ? 'Chưa tải được danh sách nhà xuất bản. Hãy thử tải lại trang.' : 'Chưa có thông tin nhà xuất bản trong tài liệu đã công bố.' }}</small>
         </label>
-        <label>Từ năm<input v-model="form.yearFrom" type="number" min="0" max="3000" /></label>
-        <label>Đến năm<input v-model="form.yearTo" type="number" min="0" max="3000" /></label>
+        <label>Từ năm<input v-model="form.yearFrom" type="number" min="0" max="3000" :aria-invalid="Boolean(yearRangeError)" aria-describedby="search-year-error" /></label>
+        <label>Đến năm<input v-model="form.yearTo" type="number" min="0" max="3000" :aria-invalid="Boolean(yearRangeError)" aria-describedby="search-year-error" /></label>
       </div>
       <div class="public-search__options">
         <label>Sắp xếp<select v-model="form.sort"><option value="relevance">Liên quan nhất</option><option value="newest">Mới cập nhật</option><option value="title">Tên A–Z</option><option value="year">Năm xuất bản mới nhất</option><option value="available">Nhiều bản sẵn sàng trước</option></select></label>
         <label class="public-search__available"><input v-model="form.availableOnly" type="checkbox" true-value="true" false-value="" /> Chỉ tài liệu còn sẵn</label>
       </div>
-      <p v-if="form.yearFrom && form.yearTo && Number(form.yearFrom) > Number(form.yearTo)" role="alert">Năm bắt đầu phải nhỏ hơn hoặc bằng năm kết thúc.</p>
+      <p v-if="yearRangeError" id="search-year-error" class="public-search__year-error" role="alert">{{ yearRangeError }}</p>
       <div class="public-search__filter-actions"><button type="button" class="secondary" @click="clearDraftFilters">Xóa bộ lọc</button><button type="submit" :disabled="loading">Áp dụng bộ lọc</button></div>
       </form>
     </Teleport>

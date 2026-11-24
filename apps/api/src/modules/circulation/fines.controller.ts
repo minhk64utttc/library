@@ -25,6 +25,7 @@ import { FinesService } from './fines.service';
 const fineListQuerySchema = pageQuerySchema.extend({
   status: z.enum(FINE_STATUSES).optional(),
   borrowerId: z.string().min(1).optional(),
+  q: z.string().trim().max(200).optional(),
 });
 
 type FineListQueryInput = z.infer<typeof fineListQuerySchema>;

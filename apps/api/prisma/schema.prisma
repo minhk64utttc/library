@@ -143,6 +143,7 @@ model Account {
   reportedIncidents Incident[] @relation("IncidentReporter")
   decidedIncidents  Incident[] @relation("IncidentDecider")
   incidentEvents    IncidentEvent[]
+  incidentAttachments IncidentAttachment[] @relation("IncidentAttachmentUploader")
   inventoryRuns    InventoryRun[]
   inventoryEvents  InventoryEvent[]
 }
@@ -567,6 +568,7 @@ model Incident {
   reportedBy Account  @relation("IncidentReporter", fields: [reportedById], references: [id])
   decidedBy  Account? @relation("IncidentDecider", fields: [decidedById], references: [id])
   events     IncidentEvent[]
+  attachments IncidentAttachment[]
 
   @@index([copyId, status])
   @@index([createdAt, id])
@@ -582,6 +584,23 @@ model IncidentEvent {
 
   incident Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
   actor    Account  @relation(fields: [actorId], references: [id])
+
+  @@index([incidentId, createdAt])
+}
+
+model IncidentAttachment {
+  id             String   @id @default(uuid())
+  incidentId     String
+  uploaderId     String
+  storageKey     String   @unique
+  originalName   String
+  mimeType       String
+  sizeBytes      Int
+  checksumSha256 String
+  createdAt      DateTime @default(now())
+
+  incident Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  uploader Account  @relation("IncidentAttachmentUploader", fields: [uploaderId], references: [id])
 
   @@index([incidentId, createdAt])
 }

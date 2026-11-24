@@ -18,7 +18,10 @@ export class ReportsService {
     const toExclusive = new Date(end.getTime() + 24 * 60 * 60 * 1000);
     const now = this.clock.now();
 
-    const [borrowedCount, returnedCount, overdueCount, finesCreated, collections, waivers, copies, popularWorks] = await Promise.all([
+    const [totalWorks, activeLoans, readerCount, borrowedCount, returnedCount, overdueCount, finesCreated, collections, waivers, copies, popularWorks, activityRows] = await Promise.all([
+      this.prisma.work.count(),
+      this.prisma.loan.count({ where: { status: 'active' } }),
+      this.prisma.account.count({ where: { roles: { some: { role: 'reader' } } } }),
       this.prisma.loan.count({ where: { borrowedAt: { gte: from, lt: toExclusive } } }),
       this.prisma.loan.count({ where: { returnedAt: { gte: from, lt: toExclusive } } }),
       this.prisma.loan.count({ where: { status: 'active', dueAt: { lt: now } } }),
@@ -37,11 +40,28 @@ export class ReportsService {
         ORDER BY COUNT(loan."id") DESC, work."title" ASC
         LIMIT 10
       `,
+      this.prisma.$queryRaw<Array<{ month: number; borrowed: number; returned: number }>>`
+        SELECT activity.month::int AS month, SUM(activity.borrowed)::int AS borrowed, SUM(activity.returned)::int AS returned
+        FROM (
+          SELECT EXTRACT(MONTH FROM (loan."borrowedAt" AT TIME ZONE 'Asia/Ho_Chi_Minh')) AS month, COUNT(*) AS borrowed, 0 AS returned
+          FROM "Loan" AS loan WHERE loan."borrowedAt" >= ${from} AND loan."borrowedAt" < ${toExclusive}
+          GROUP BY month
+          UNION ALL
+          SELECT EXTRACT(MONTH FROM (loan."returnedAt" AT TIME ZONE 'Asia/Ho_Chi_Minh')) AS month, 0 AS borrowed, COUNT(*) AS returned
+          FROM "Loan" AS loan WHERE loan."returnedAt" >= ${from} AND loan."returnedAt" < ${toExclusive}
+          GROUP BY month
+        ) AS activity GROUP BY activity.month ORDER BY activity.month
+      `,
     ]);
+
+    const activityByMonth = new Map(activityRows.map((row) => [row.month, row]));
 
     return {
       from: query.from,
       to: query.to,
+      totalWorks,
+      activeLoans,
+      readerCount,
       borrowedCount,
       returnedCount,
       overdueCount,
@@ -50,6 +70,11 @@ export class ReportsService {
       finesWaived: waivers._sum.approvedAmount ?? 0,
       copyStatus: copies.map((row) => ({ status: row.status, count: row._count._all })),
       popularWorks,
+      monthlyActivity: Array.from({ length: 12 }, (_, index) => {
+        const month = index + 1;
+        const row = activityByMonth.get(month);
+        return { month, borrowed: row?.borrowed ?? 0, returned: row?.returned ?? 0 };
+      }),
     };
   }
 }

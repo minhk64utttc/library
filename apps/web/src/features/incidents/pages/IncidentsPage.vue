@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   INCIDENT_DECISIONS,
@@ -49,6 +49,10 @@ const pending = ref(false);
 const errorMessage = ref('');
 const successMessage = ref('');
 const selectedId = ref<string | null>(null);
+const detailDialog = ref<HTMLDialogElement | null>(null);
+const selectedImages = ref<File[]>([]);
+const selectedImagesIncidentId = ref<string | null>(null);
+const imagePreviews = ref<Array<{ name: string; url: string }>>([]);
 const createForm = reactive({ copyId: '', kind: 'reported_lost' as IncidentKind, description: '', evidence: '' });
 const infoText = ref('');
 const requestText = ref('');
@@ -64,7 +68,18 @@ const statusFilter = computed<IncidentStatus | ''>(() =>
     : '',
 );
 const selected = computed(() => incidents.value.find((incident) => incident.id === selectedId.value) ?? null);
+const decisionImpact = computed(() => ({
+  no_change: 'Kết thúc tra soát và đưa bản sao về trạng thái phục vụ nếu điều kiện kho cho phép.',
+  confirmed_lost: 'Đánh dấu bản sao là mất; nếu đang mượn, khoản mượn sẽ được đóng theo trạng thái mất.',
+  confirmed_damaged: 'Đánh dấu bản sao hư hỏng; nếu còn đang mượn, trạng thái hư hỏng được áp dụng khi nhận trả.',
+}[decisionForm.decision]));
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / 20)));
+
+async function openIncident(id: string): Promise<void> {
+  selectedId.value = id;
+  await nextTick();
+  detailDialog.value?.showModal();
+}
 
 async function load(): Promise<void> {
   loading.value = true;
@@ -116,19 +131,97 @@ async function runAction(action: () => Promise<IncidentDto>, message: string): P
 }
 
 async function onCreate(): Promise<void> {
-  await runAction(
-    () => incidentsApi.createIncident({
+  if (pending.value) return;
+  pending.value = true;
+  errorMessage.value = '';
+  successMessage.value = '';
+  try {
+    const created = await incidentsApi.createIncident({
       copyId: createForm.copyId,
       kind: createForm.kind,
       description: createForm.description.trim(),
       ...(createForm.evidence.trim() ? { evidence: createForm.evidence.trim() } : {}),
-    }),
-    'Đã ghi nhận hồ sơ. Bản sao sẵn sàng được tạm giữ để tra soát; khoản mượn không tự đóng.',
-  );
-  if (!errorMessage.value) {
+    });
     createForm.copyId = '';
     createForm.description = '';
     createForm.evidence = '';
+    selectedId.value = created.id;
+    successMessage.value = 'Đã ghi nhận hồ sơ. Bản sao sẵn sàng được tạm giữ để tra soát; khoản mượn không tự đóng.';
+    if (selectedImages.value.length) {
+      selectedImagesIncidentId.value = created.id;
+      try {
+        await incidentsApi.uploadIncidentAttachments(created.id, selectedImages.value);
+        clearSelectedImages();
+      } catch (cause) {
+        errorMessage.value = attachmentError(cause);
+        successMessage.value += ' Ảnh chưa tải lên; có thể thử lại trong chi tiết hồ sơ.';
+      }
+    }
+    await load();
+  } catch (cause) {
+    errorMessage.value = cause instanceof ApiError ? cause.message : 'Không ghi nhận được hồ sơ. Hãy kiểm tra thông tin rồi thử lại.';
+  } finally {
+    pending.value = false;
+  }
+}
+
+function attachmentError(cause: unknown): string {
+  if (cause instanceof ApiError) {
+    if (cause.code === 'INVALID_INCIDENT_IMAGE' || cause.code === 'INVALID_INCIDENT_IMAGE_CONTENT') return cause.message;
+    if (cause.code === 'ATTACHMENT_LIMIT') return cause.message;
+    if (cause.status === 401) return 'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại rồi thử tải ảnh.';
+    if (cause.status === 403) return 'Tài khoản không có quyền tải ảnh sự cố.';
+    return cause.message;
+  }
+  return 'Không tải được ảnh. Kiểm tra kết nối rồi thử lại.';
+}
+
+function onImageSelection(event: Event): void {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files ?? []);
+  input.value = '';
+  if (files.length > 3 || files.some((file) => file.size > 5 * 1024 * 1024)) {
+    errorMessage.value = 'Mỗi lần chọn tối đa 3 ảnh; từng ảnh không quá 5 MB.';
+    return;
+  }
+  errorMessage.value = '';
+  releaseImagePreviews();
+  selectedImages.value = files;
+  imagePreviews.value = files.map((file) => ({ name: file.name, url: URL.createObjectURL(file) }));
+}
+
+function releaseImagePreviews(): void {
+  for (const preview of imagePreviews.value) URL.revokeObjectURL(preview.url);
+  imagePreviews.value = [];
+}
+
+function clearSelectedImages(): void {
+  releaseImagePreviews();
+  selectedImages.value = [];
+  selectedImagesIncidentId.value = null;
+  const input = document.querySelector<HTMLInputElement>('#incident-images');
+  if (input) input.value = '';
+}
+
+async function uploadSelectedImages(): Promise<void> {
+  if (!selected.value || selected.value.status === 'resolved' || !selectedImages.value.length || pending.value) return;
+  if (selectedImagesIncidentId.value && selectedImagesIncidentId.value !== selected.value.id) {
+    errorMessage.value = 'Ảnh đang chờ tải thuộc hồ sơ khác. Hãy mở đúng hồ sơ để tải lại.';
+    return;
+  }
+  selectedImagesIncidentId.value = selected.value.id;
+  pending.value = true;
+  errorMessage.value = '';
+  successMessage.value = '';
+  try {
+    await incidentsApi.uploadIncidentAttachments(selected.value.id, selectedImages.value);
+    clearSelectedImages();
+    successMessage.value = 'Đã tải ảnh bằng chứng lên hồ sơ.';
+    await load();
+  } catch (cause) {
+    errorMessage.value = attachmentError(cause);
+  } finally {
+    pending.value = false;
   }
 }
 
@@ -163,6 +256,7 @@ function setPage(value: number): void {
 
 watch(() => [route.query.status, route.query.page], () => { void load(); });
 onMounted(() => { void load(); });
+onBeforeUnmount(releaseImagePreviews);
 </script>
 
 <template>
@@ -202,7 +296,15 @@ onMounted(() => { void load(); });
         <label class="incident-form__wide">Thông tin, bằng chứng ban đầu
           <textarea v-model="createForm.evidence" maxlength="4000" rows="2" />
         </label>
-        <button type="submit" :disabled="pending || copies.length === 0">Tạo hồ sơ</button>
+        <label class="incident-form__wide">Ảnh bằng chứng (tối đa 3 ảnh, mỗi ảnh 5 MB)
+          <input id="incident-images" type="file" accept="image/jpeg,image/png,image/webp" multiple @change="onImageSelection" :disabled="Boolean(selectedImagesIncidentId)" />
+          <small>Ảnh JPEG, PNG hoặc WebP. Ảnh được chuẩn hóa và lưu riêng trong kho tệp của thư viện.</small>
+        </label>
+        <div v-if="imagePreviews.length" class="incident-images incident-form__wide" aria-label="Ảnh đã chọn">
+          <figure v-for="preview in imagePreviews" :key="preview.url"><img :src="preview.url" :alt="preview.name" /><figcaption>{{ preview.name }}</figcaption></figure>
+        </div>
+        <p v-if="selectedImagesIncidentId" class="incident-form__wide" role="status">Ảnh chưa tải xong cho hồ sơ đã tạo. Mở hồ sơ đó và thử tải lại trước khi tạo hồ sơ mới.</p>
+        <button type="submit" :disabled="pending || copies.length === 0 || Boolean(selectedImagesIncidentId)">Tạo hồ sơ</button>
       </form>
       <p v-if="copies.length === 0" class="empty-state">Tìm theo mã cuốn để chọn bản sao cần ghi nhận.</p>
     </fieldset>
@@ -228,7 +330,7 @@ onMounted(() => { void load(); });
             <td>{{ kindLabels[incident.kind] }}</td>
             <td><span class="status-badge" :data-state="incident.status">{{ statusLabels[incident.status] }}</span></td>
             <td>{{ new Date(incident.createdAt).toLocaleDateString('vi-VN') }}</td>
-            <td><button type="button" :aria-expanded="selectedId === incident.id" @click="selectedId = selectedId === incident.id ? null : incident.id">Chi tiết</button></td>
+              <td><button type="button" @click="openIncident(incident.id)">Chi tiết</button></td>
           </tr>
         </tbody>
       </table>
@@ -239,7 +341,8 @@ onMounted(() => { void load(); });
       <button type="button" :disabled="page >= pageCount || loading" @click="setPage(page + 1)">Trang sau</button>
     </div>
 
-    <section v-if="selected" class="incident-detail" aria-label="Chi tiết hồ sơ sự cố">
+      <dialog v-if="selected" ref="detailDialog" class="incident-detail" aria-label="Chi tiết hồ sơ sự cố" @close="selectedId = null">
+        <button type="button" class="incident-detail__close" @click="detailDialog?.close()">Đóng</button>
       <h2>{{ selected.copyCode }} · {{ selected.workTitle }}</h2>
       <p><strong>Người ghi nhận:</strong> {{ selected.reportedByName }}</p>
       <p><strong>Mô tả:</strong> {{ selected.description }}</p>
@@ -247,6 +350,25 @@ onMounted(() => { void load(); });
       <p v-if="selected.requestInfo"><strong>Cần bổ sung:</strong> {{ selected.requestInfo }}</p>
       <p v-if="selected.decision"><strong>Quyết định:</strong> {{ decisionLabels[selected.decision] }} · {{ selected.decisionReason }}</p>
       <p v-if="selected.decidedByName"><strong>Người quyết định:</strong> {{ selected.decidedByName }}</p>
+
+      <section class="incident-attachments" aria-label="Ảnh bằng chứng">
+        <h3>Ảnh bằng chứng · {{ selected.attachments.length }}/6</h3>
+        <div v-if="selected.attachments.length" class="incident-images">
+          <figure v-for="attachment in selected.attachments" :key="attachment.id">
+            <a :href="incidentsApi.incidentAttachmentUrl(selected.id, attachment.id)" target="_blank" rel="noopener noreferrer">
+              <img :src="incidentsApi.incidentAttachmentUrl(selected.id, attachment.id)" :alt="attachment.originalName" loading="lazy" />
+            </a>
+            <figcaption>{{ attachment.originalName }} · {{ Math.ceil(attachment.sizeBytes / 1024) }} KB</figcaption>
+          </figure>
+        </div>
+        <p v-else class="empty-state">Chưa có ảnh đính kèm.</p>
+        <form v-if="canReport && selected.status !== 'resolved' && selected.attachments.length < 6" class="incident-detail__form" @submit.prevent="uploadSelectedImages">
+          <label>Thêm ảnh (tối đa {{ Math.min(3, 6 - selected.attachments.length) }} ảnh mỗi lần)
+            <input type="file" accept="image/jpeg,image/png,image/webp" multiple @change="onImageSelection" />
+          </label>
+          <button type="submit" :disabled="pending || !selectedImages.length">{{ pending ? 'Đang tải ảnh…' : 'Tải ảnh lên' }}</button>
+        </form>
+      </section>
 
       <button v-if="canReport && selected.status === 'new'" type="button" :disabled="pending" @click="runAction(() => incidentsApi.submitIncident(selected!.id), 'Đã gửi hồ sơ để xem xét.')">Gửi xem xét</button>
       <form v-if="canReport && selected.status === 'need_info'" class="incident-detail__form" @submit.prevent="onAddInfo">
@@ -268,12 +390,20 @@ onMounted(() => { void load(); });
               <option v-for="decision in INCIDENT_DECISIONS" :key="decision" :value="decision">{{ decisionLabels[decision] }}</option>
             </select>
           </label>
+          <p class="incident-detail__impact">{{ decisionImpact }}</p>
           <label>Lý do
             <textarea v-model="decisionForm.reason" required minlength="10" maxlength="2000" rows="2" />
           </label>
           <button type="submit" :disabled="pending">Ghi quyết định</button>
         </form>
       </template>
-    </section>
+    </dialog>
   </section>
 </template>
+
+<style scoped>
+.incident-detail { width: min(760px, calc(100% - 28px)); max-height: min(88vh, 900px); overflow: auto; padding: 24px; border: 1px solid var(--line); border-radius: 14px; color: var(--ink); }
+.incident-detail::backdrop { background: rgb(12 24 40 / 52%); }
+.incident-detail__close { float: right; }
+.incident-detail__impact { padding: 11px 13px; color: #344a64; background: #f1f5fb; border-radius: 8px; }
+</style>

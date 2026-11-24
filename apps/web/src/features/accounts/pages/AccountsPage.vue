@@ -15,6 +15,9 @@ const canManage = computed(() => session.can('accounts:manage'));
 const accounts = ref<AccountDto[]>([]);
 const total = ref(0);
 const loading = ref(false);
+const backgroundRefreshing = ref(false);
+const lastUpdatedAt = ref<Date | null>(null);
+const refreshNotice = ref('');
 const errorMessage = ref('');
 const noticeMessage = ref('');
 const query = computed(() => {
@@ -42,6 +45,8 @@ const dialogTitle = computed(() => mode.value === 'create' ? 'Tạo tài khoản
 const isSelf = computed(() => selected.value?.id === session.account?.id);
 let returnFocus: HTMLElement | null = null;
 let loadSequence = 0;
+let refreshTimer: ReturnType<typeof setInterval> | undefined;
+let backgroundRequest = false;
 
 function closeMenus(event?: Event): void {
   for (const menu of accountSection.value?.querySelectorAll<HTMLDetailsElement>('.accounts__menu[open]') ?? []) {
@@ -74,19 +79,30 @@ function errorText(error: unknown): string {
   if (error.status === 409) return 'Email đã tồn tại. Hãy kiểm tra tài khoản có sẵn hoặc dùng email khác.';
   return error.code !== 'ERROR' ? error.message : 'Không lưu được thay đổi. Vui lòng thử lại.';
 }
-async function load(): Promise<void> {
+async function load(options: { quiet?: boolean } = {}): Promise<void> {
+  const quiet = options.quiet ?? false;
+  if (quiet && (backgroundRequest || loading.value)) return;
+  if (quiet) backgroundRequest = true;
   const sequence = ++loadSequence;
-  loading.value = true;
-  errorMessage.value = '';
+  if (quiet) backgroundRefreshing.value = true;
+  else { loading.value = true; errorMessage.value = ''; }
+  refreshNotice.value = '';
   try {
     const result = await accountsApi.listAccounts(query.value);
     if (sequence !== loadSequence) return;
     accounts.value = result.items;
     total.value = result.total;
+    lastUpdatedAt.value = new Date();
     if (query.value.page > Math.max(1, Math.ceil(result.total / query.value.pageSize))) navigate({ page: 1 });
   } catch (error) {
-    if (sequence === loadSequence) errorMessage.value = errorText(error);
-  } finally { if (sequence === loadSequence) loading.value = false; }
+    if (sequence === loadSequence) {
+      if (quiet) refreshNotice.value = 'Chưa thể cập nhật trạng thái mới nhất. Danh sách đang hiển thị dữ liệu lần tải trước.';
+      else errorMessage.value = errorText(error);
+    }
+  } finally {
+    if (sequence === loadSequence && !quiet) loading.value = false;
+    if (quiet) { backgroundRefreshing.value = false; backgroundRequest = false; }
+  }
 }
 async function openDialog(nextMode: DialogMode, account?: AccountDto): Promise<void> {
   if (pending.value) return;
@@ -151,13 +167,31 @@ watch(() => route.fullPath, () => {
   closeMenus();
   void load();
 }, { immediate: true });
-onMounted(() => document.addEventListener('pointerdown', closeMenus));
-onBeforeUnmount(() => document.removeEventListener('pointerdown', closeMenus));
+function refreshWhenVisible(): void {
+  if (document.visibilityState === 'visible') void load({ quiet: true });
+}
+function refreshNow(): void { void load({ quiet: true }); }
+function retryLoad(): void { void load(); }
+onMounted(() => {
+  document.addEventListener('pointerdown', closeMenus);
+  document.addEventListener('visibilitychange', refreshWhenVisible);
+  window.addEventListener('focus', refreshWhenVisible);
+  refreshTimer = window.setInterval(() => {
+    if (document.visibilityState === 'visible') void load({ quiet: true });
+  }, 20_000);
+});
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', closeMenus);
+  document.removeEventListener('visibilitychange', refreshWhenVisible);
+  window.removeEventListener('focus', refreshWhenVisible);
+  if (refreshTimer) window.clearInterval(refreshTimer);
+});
 </script>
 
 <template>
   <section ref="accountSection" class="accounts" aria-labelledby="accounts-title">
-    <header class="accounts__header"><div><p class="eyebrow">Quản trị thư viện</p><h1 id="accounts-title" ref="heading" tabindex="-1">Tài khoản</h1><p>Quản lý người dùng, vai trò và quyền đăng nhập.</p></div><button v-if="canManage" type="button" @click="openDialog('create')">+ Tạo tài khoản</button></header>
+    <header class="accounts__header"><div><p class="eyebrow">Quản trị thư viện</p><h1 id="accounts-title" ref="heading" tabindex="-1">Tài khoản</h1><p>Quản lý người dùng, vai trò và quyền đăng nhập.</p><small v-if="lastUpdatedAt" class="accounts__updated" role="status" aria-live="polite">{{ backgroundRefreshing ? 'Đang cập nhật…' : `Cập nhật lúc ${lastUpdatedAt.toLocaleTimeString('vi-VN')}` }}</small></div><div class="accounts__header-actions"><button type="button" :disabled="loading || backgroundRefreshing" @click="refreshNow">Làm mới</button><button v-if="canManage" type="button" @click="openDialog('create')">+ Tạo tài khoản</button></div></header>
+    <p v-if="refreshNotice" class="accounts__refresh-notice" role="status">{{ refreshNotice }} <button type="button" @click="refreshNow">Thử cập nhật lại</button></p>
     <form class="accounts__filters" role="search" @submit.prevent="navigate({ q: searchText.trim() || undefined, role: filterForm.role || undefined, status: filterForm.status || undefined, page: 1 })">
       <label>Tìm theo tên hoặc email<input v-model="searchText" type="search" maxlength="200" placeholder="Nhập tên hoặc email…" /></label>
       <label>Vai trò<select v-model="filterForm.role"><option value="">Tất cả vai trò</option><option v-for="role in ROLES" :key="role" :value="role">{{ ROLE_LABELS[role] }}</option></select></label>
@@ -165,7 +199,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', closeMenus));
     </form>
     <div v-if="query.q || query.role || query.status" class="accounts__chips" aria-label="Bộ lọc đang áp dụng"><button v-if="query.q" @click="navigate({ q: undefined, page: 1 })">{{ query.q }} ×</button><button v-if="query.role" @click="navigate({ role: undefined, page: 1 })">{{ ROLE_LABELS[query.role] }} ×</button><button v-if="query.status" @click="navigate({ status: undefined, page: 1 })">{{ query.status === 'active' ? 'Đang hoạt động' : 'Đã khóa' }} ×</button><button @click="clearFilters">Xóa bộ lọc</button></div>
     <p v-if="noticeMessage" class="accounts__notice" role="status">{{ noticeMessage }}</p>
-    <p v-if="errorMessage" role="alert">{{ errorMessage }} <button @click="load">Thử lại</button></p>
+    <p v-if="errorMessage" role="alert">{{ errorMessage }} <button @click="retryLoad">Thử lại</button></p>
     <div v-if="loading" class="accounts__skeleton" role="status" aria-label="Đang tải tài khoản"><div v-for="n in 4" :key="n"></div></div>
     <div v-else-if="!errorMessage && !accounts.length" class="empty-state"><h2>{{ query.q || query.role || query.status ? 'Không có tài khoản khớp bộ lọc' : 'Chưa có tài khoản' }}</h2><p>Thử tên, email khác hoặc bỏ bớt điều kiện lọc.</p><button v-if="canManage" @click="openDialog('create')">Tạo tài khoản</button></div>
     <template v-else-if="!errorMessage">
@@ -204,4 +238,5 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', closeMenus));
 
 <style scoped>
 .accounts__header{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:24px}.accounts__header h1{margin:5px 0}.accounts__header p{margin-bottom:0;color:var(--muted)}.accounts__filters{display:grid;grid-template-columns:minmax(220px,2fr) 1fr 1fr auto;align-items:end;gap:14px;margin-bottom:16px}.accounts__filter-actions,.accounts__chips,.accounts__badges,.accounts__pagination{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.accounts__chips{margin:14px 0}.accounts__chips button{border-radius:20px;font-size:.75rem}.accounts__table{overflow-x:auto}.accounts__person{display:flex;gap:12px;align-items:center}.accounts__person>div{min-width:0}.accounts__avatar{display:grid;place-items:center;flex-shrink:0;width:38px;height:38px;background:#edf2fa;color:var(--navy);border:1px solid #dce4ef;border-radius:50%;font-weight:700}td{vertical-align:top}td strong{display:block;font-size:.88rem}td small{display:block;color:var(--muted);font-size:.74rem;margin-top:5px;overflow-wrap:anywhere}.accounts__self{color:var(--navy)!important}.accounts__role{display:inline-block;padding:5px 8px;border:1px solid #dce4ef;background:#f1f5fa;color:var(--navy);font-size:.72rem;border-radius:5px;white-space:nowrap}.accounts__remaining summary{cursor:pointer;padding:5px 8px;color:var(--navy);font-size:.75rem}.accounts__remaining[open]{display:grid;gap:4px}.accounts__status{display:inline-block;padding:5px 8px;border:1px solid #d0e2d7;background:#eef7f1;color:#2b6044;font-size:.75rem;border-radius:5px;white-space:nowrap}.accounts__status[data-state="disabled"]{border-color:#ddd;background:#f4f4f4;color:#606672}.accounts__muted{color:var(--muted);font-size:.8rem}.accounts__menu summary{width:36px;padding:4px 10px;cursor:pointer;border:1px solid var(--line);border-radius:6px;list-style:none;font-weight:700}.accounts__menu>div{display:grid;gap:4px;width:190px;padding:8px;margin-top:5px;border:1px solid var(--line);border-radius:8px;background:#fff;box-shadow:0 6px 18px #10233f12}.accounts__menu button{text-align:left;background:#fff;color:var(--navy);border:0;font-size:.75rem;min-height:32px;padding:7px 9px}.accounts__menu button:hover{background:#edf2fa}.accounts__pagination{justify-content:flex-end;margin-top:18px;font-size:.8rem}.accounts__pagination label{display:flex;align-items:center;gap:8px}.accounts__pagination select{width:auto}.accounts__notice{padding:13px;color:#2b6044;background:#eef7f1;border:1px solid #d0e2d7;border-radius:8px}.accounts__skeleton{display:grid;gap:12px}.accounts__skeleton div{height:70px;background:#edf2f7;border-radius:6px}.accounts__dialog{width:min(600px,calc(100% - 28px));max-height:90vh;overflow:auto;padding:26px;border:1px solid var(--line);border-radius:12px;color:var(--ink)}.accounts__dialog::backdrop{background:#12244288}.accounts__dialog form{display:grid;gap:18px}.accounts__dialog-head{display:flex;justify-content:space-between;align-items:center;gap:16px}.accounts__dialog-head h2{margin:0;font-size:1.3rem}.accounts__dialog-head button{background:transparent;color:var(--ink);border:0;font-size:1.4rem;min-width:36px}.accounts__selected{display:grid;gap:5px;padding:12px;background:#f1f5fa;border-radius:8px;margin:0;font-size:.83rem}.accounts__selected span{color:var(--muted);overflow-wrap:anywhere}.accounts__fields{display:grid;gap:16px;border:0;padding:0;min-width:0}.accounts__roles{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:16px;border:1px solid var(--line);border-radius:8px}.accounts__roles p{grid-column:1/-1;margin:0;color:var(--muted);font-size:.75rem}.accounts__roles label,.accounts__check{display:flex;align-items:center;gap:8px;font-size:.8rem}.accounts__roles input,.accounts__check input{width:16px;height:16px;flex-shrink:0}.accounts__group{padding:16px;background:#f6f8fc;border:1px solid var(--line);border-radius:8px}.accounts__dialog small{color:var(--muted);font-size:.75rem;line-height:1.5}.accounts__dialog-actions{display:flex;justify-content:flex-end;gap:10px;padding-top:12px;border-top:1px solid var(--line)}.accounts__dialog-actions>button:first-child{background:white;color:var(--navy)}.accounts__warning{padding:12px;background:#fff6df;color:#79551b;border-radius:6px;font-size:.8rem}.accounts__dialog-error{margin:0;color:#9f3131;font-size:.85rem}.sr-only{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}@media(max-width:900px){.accounts__filters{grid-template-columns:1fr 1fr}.accounts__header{align-items:flex-start}}@media(max-width:600px){.accounts__table caption{display:block;width:100%;text-align:left}.accounts__header{flex-direction:column}.accounts__filters{grid-template-columns:1fr}.accounts__table table,.accounts__table tbody,.accounts__table tr,.accounts__table td{display:block;min-width:0;width:100%}.accounts__table thead{display:none}.accounts__table tr{padding:16px 0;border-bottom:1px solid var(--line)}.accounts__table td{border:0;padding:8px 4px}.accounts__table td::before{content:attr(data-label);display:block;color:var(--muted);font-size:.68rem;margin-bottom:6px}.accounts__pagination{justify-content:flex-start}.accounts__roles{grid-template-columns:1fr}.accounts__dialog{padding:18px}.accounts__person strong{overflow-wrap:anywhere}}
+.accounts__header-actions{display:flex;gap:9px;align-items:center;flex-shrink:0}.accounts__updated{display:block;margin-top:7px;color:var(--muted);font-size:.75rem}.accounts__refresh-notice{padding:10px 12px;color:#76521d;background:#fff7e6;border:1px solid #edd9ae;border-radius:8px;font-size:.82rem}.accounts__refresh-notice button{margin-left:8px}@media(max-width:600px){.accounts__header-actions{width:100%;flex-wrap:wrap}}
 </style>

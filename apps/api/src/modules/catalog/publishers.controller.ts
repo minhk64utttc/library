@@ -1,9 +1,9 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import {
-  pageQuerySchema,
+  publisherListQuerySchema,
   publisherInputSchema,
   publisherUpdateSchema,
-  type PageQuery,
+  type PublisherListQuery,
   type Paginated,
   type PublisherDto,
   type PublisherInput,
@@ -24,7 +24,7 @@ export class PublishersController {
   @Get()
   @RequirePermissions('catalog:read')
   list(
-    @Query(new ZodValidationPipe(pageQuerySchema)) query: PageQuery,
+    @Query(new ZodValidationPipe(publisherListQuerySchema)) query: PublisherListQuery,
   ): Promise<Paginated<PublisherDto>> {
     return this.publishers.list(query);
   }

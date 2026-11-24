@@ -9,7 +9,7 @@ import * as circApi from '../api';
 const session = useSessionStore();
 const route = useRoute();
 const router = useRouter();
-function navigate(nextPage = 1): void { void router.push({ query: { status: statusFilter.value || 'all', page: String(nextPage) } }); }
+function navigate(nextPage = 1): void { void router.push({ query: { tab: activeTab.value, status: statusFilter.value || 'all', ...(searchText.value.trim() ? { q: searchText.value.trim() } : {}), page: String(nextPage) } }); }
 const canCollect = computed(() => session.can('fines:collect'));
 const canWaive = computed(() => session.can('fines:waive'));
 const canRequestWaiver = computed(() => session.can('fines:request-waiver'));
@@ -19,9 +19,20 @@ const loading = ref(false);
 const error = ref('');
 const notice = ref('');
 const statusFilter = ref<FineStatus | ''>('unpaid');
+const activeTab = ref<'debts' | 'waivers' | 'receipts'>('debts');
+const searchText = ref('');
 const page = ref(1);
+function selectTab(tab: 'debts' | 'waivers' | 'receipts'): void {
+  activeTab.value = tab;
+  statusFilter.value = tab === 'receipts' ? '' : 'unpaid';
+  page.value = 1;
+  void router.push({ query: { tab, status: statusFilter.value || 'all', ...(searchText.value.trim() ? { q: searchText.value.trim() } : {}), page: '1' } });
+}
 const pendingId = ref('');
 const paymentAmounts = reactive<Record<string, number>>({});
+type PaymentAttempt = { amount: number; idempotencyKey: string };
+const paymentAttemptsStorageKey = `thu-vien:fine-payment-attempts:${session.account?.id ?? 'unknown'}`;
+const paymentAttempts = reactive<Record<string, PaymentAttempt>>(loadPaymentAttempts());
 const waiverAmounts = reactive<Record<string, number>>({});
 const waiverReasons = reactive<Record<string, string>>({});
 const decisionAmounts = reactive<Record<string, number>>({});
@@ -30,18 +41,47 @@ const receiptId = ref('');
 
 const statusLabels: Record<string, string> = { unpaid: 'Còn phải thu', paid: 'Đã thanh toán', waived: 'Đã miễn đủ' };
 
+function loadPaymentAttempts(): Record<string, PaymentAttempt> {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(paymentAttemptsStorageKey) ?? '{}') as Record<string, unknown>;
+    return Object.fromEntries(Object.entries(saved).filter((entry): entry is [string, PaymentAttempt] => {
+      const value = entry[1];
+      return typeof value === 'object' && value !== null
+        && typeof (value as PaymentAttempt).amount === 'number'
+        && typeof (value as PaymentAttempt).idempotencyKey === 'string'
+        && (value as PaymentAttempt).idempotencyKey.length >= 8;
+    }));
+  } catch {
+    return {};
+  }
+}
+
+function savePaymentAttempts(): void {
+  try { sessionStorage.setItem(paymentAttemptsStorageKey, JSON.stringify(paymentAttempts)); } catch { /* The retry still works while this page remains open. */ }
+}
+
+function newPaymentIdempotencyKey(): string {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  if (typeof globalThis.crypto?.getRandomValues === 'function') {
+    const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+  }
+  return `payment-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+
 async function load(): Promise<void> {
   loading.value = true;
   error.value = '';
   try {
     const [fineResult, waiverResult] = await Promise.all([
-      circApi.listFines({ page: page.value, pageSize: 10, ...(statusFilter.value ? { status: statusFilter.value } : {}) }),
+      circApi.listFines({ page: page.value, pageSize: 10, ...(statusFilter.value ? { status: statusFilter.value } : {}), ...(searchText.value.trim() ? { q: searchText.value.trim() } : {}) }),
       canWaive.value ? circApi.listFineWaivers(1) : Promise.resolve(null),
     ]);
     fines.value = fineResult;
     waivers.value = waiverResult;
     for (const fine of fineResult.items) {
-      paymentAmounts[fine.id] = Math.min(paymentAmounts[fine.id] ?? fine.remainingAmount, fine.remainingAmount);
+      const retryAmount = paymentAttempts[fine.id]?.amount;
+      paymentAmounts[fine.id] = retryAmount ?? Math.min(paymentAmounts[fine.id] ?? fine.remainingAmount, fine.remainingAmount);
       waiverAmounts[fine.id] = Math.min(waiverAmounts[fine.id] ?? fine.remainingAmount, fine.remainingAmount);
     }
     for (const request of waiverResult?.items ?? []) {
@@ -60,18 +100,62 @@ async function collect(fine: FineDto): Promise<void> {
   error.value = '';
   notice.value = '';
   receiptId.value = '';
+  const amount = paymentAmounts[fine.id] ?? 0;
   try {
-    const result = await circApi.payFine(fine.id, { amount: paymentAmounts[fine.id] ?? 0 }, crypto.randomUUID());
+    let attempt = paymentAttempts[fine.id];
+    if (!attempt || attempt.amount !== amount) attempt = { amount, idempotencyKey: newPaymentIdempotencyKey() };
+    paymentAttempts[fine.id] = attempt;
+    savePaymentAttempts();
+    const result = await circApi.payFine(fine.id, { amount }, attempt.idempotencyKey);
+    delete paymentAttempts[fine.id];
+    savePaymentAttempts();
     receiptId.value = result.payment.id;
     notice.value = `Đã ghi nhận ${result.payment.amount.toLocaleString('vi-VN')} ₫. Biên nhận ${result.payment.receiptNumber}.`;
     await load();
   } catch (cause) {
-    error.value = cause instanceof ApiError && cause.code === 'AMOUNT_EXCEEDS_BALANCE'
-      ? 'Số tiền thu vượt quá số còn phải thu. Tải lại khoản phạt rồi thử lại.'
-      : 'Không ghi nhận được khoản thu. Giao dịch được bảo vệ chống ghi nhận lặp.';
+    if (cause instanceof ApiError && cause.status < 500) {
+      delete paymentAttempts[fine.id];
+      savePaymentAttempts();
+    }
+    error.value = cause instanceof ApiError ? paymentError(cause) : 'Không nhận được phản hồi từ máy chủ. Có thể thử lại; hệ thống sẽ nhận diện lần gửi trước để tránh thu trùng.';
   } finally {
     pendingId.value = '';
   }
+}
+
+function paymentError(cause: ApiError): string {
+  if (cause.code === 'AMOUNT_EXCEEDS_BALANCE') return 'Số tiền thu vượt quá số còn phải thu. Tải lại khoản phạt rồi thử lại.';
+  if (cause.code === 'FINE_SETTLED') return 'Khoản phạt đã được thu hoặc miễn đủ. Tải lại danh sách để cập nhật.';
+  if (cause.code === 'IDEMPOTENCY_CONFLICT' || cause.code === 'IDEMPOTENCY_KEY_REQUIRED') return 'Yêu cầu thu tiền không hợp lệ hoặc đã thay đổi. Tải lại khoản phạt rồi thử lại.';
+  if (cause.code === 'NOT_FOUND') return 'Không tìm thấy khoản phạt này. Tải lại danh sách.';
+  if (cause.status === 401) return 'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.';
+  if (cause.status === 403) return 'Tài khoản không có quyền thu khoản phạt này.';
+  return 'Không ghi nhận được khoản thu. Tải lại khoản phạt; nếu lỗi còn tiếp diễn, báo quản trị viên kèm mã lỗi ' + cause.code + '.';
+}
+
+async function exportUnpaidFines(): Promise<void> {
+  error.value = ''; notice.value = '';
+  try {
+    const entries: FineDto[] = [];
+    let currentPage = 1;
+    let totalPages = 1;
+    do {
+      const result = await circApi.listFines({ page: currentPage, pageSize: 100, status: 'unpaid' });
+      entries.push(...result.items); totalPages = Math.ceil(result.total / 100); currentPage += 1;
+    } while (currentPage <= totalPages && entries.length < 20_000);
+    const cell = (value: unknown): string => {
+      let text = value == null ? '' : String(value);
+      if (/^[\s]*[=+\-@]/.test(text)) text = `'${text}`;
+      return `"${text.replaceAll('"', '""')}"`;
+    };
+    const rows: unknown[][] = [
+      ['Mã bạn đọc', 'Bạn đọc', 'Mã cuốn', 'Tài liệu', 'Tổng phạt (VND)', 'Đã thu (VND)', 'Đã miễn (VND)', 'Còn nợ (VND)'],
+      ...entries.map((fine) => [fine.borrowerId, fine.borrowerName, fine.copyCode, fine.workTitle, fine.amount, fine.paidAmount, fine.waivedAmount, fine.remainingAmount]),
+    ];
+    const url = URL.createObjectURL(new Blob([`\uFEFF${rows.map((row) => row.map(cell).join(',')).join('\r\n')}`], { type: 'text/csv;charset=utf-8' }));
+    const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'ban-doc-con-no-phat.csv'; anchor.click(); URL.revokeObjectURL(url);
+    notice.value = `Đã xuất ${entries.length.toLocaleString('vi-VN')} khoản phạt còn nợ.`;
+  } catch (cause) { error.value = cause instanceof ApiError ? cause.message : 'Không xuất được danh sách khoản phạt.'; }
 }
 
 async function requestWaiver(fine: FineDto): Promise<void> {
@@ -124,8 +208,10 @@ function formatDate(value: string): string {
 }
 
 watch(() => route.fullPath, () => {
+  activeTab.value = route.query.tab === 'waivers' || route.query.tab === 'receipts' ? route.query.tab : 'debts';
+  searchText.value = typeof route.query.q === 'string' ? route.query.q : '';
   const status = route.query.status;
-  statusFilter.value = status === 'all' ? '' : status === 'paid' || status === 'waived' ? status : 'unpaid';
+  statusFilter.value = activeTab.value === 'receipts' ? '' : status === 'all' ? '' : status === 'paid' || status === 'waived' ? status : 'unpaid';
   const value = Number(route.query.page);
   page.value = Number.isInteger(value) && value > 0 ? value : 1;
   void load();
@@ -138,6 +224,7 @@ watch(() => route.fullPath, () => {
       <p class="eyebrow">Lưu thông</p>
       <h1 id="fines-title">Khoản phạt và thu tiền</h1>
       <p>Theo dõi tiền gốc, số đã thu, số được miễn và số còn phải thu.</p>
+      <button v-if="canCollect" type="button" @click="exportUnpaidFines">Xuất bạn đọc còn nợ CSV</button>
     </header>
 
     <p v-if="error" role="alert">{{ error }}</p>
@@ -145,7 +232,13 @@ watch(() => route.fullPath, () => {
       {{ notice }} <RouterLink v-if="receiptId" :to="`/circulation/receipts/${receiptId}`">Mở biên nhận</RouterLink>
     </p>
 
-    <section v-if="canWaive" class="fines__waivers" aria-labelledby="waiver-queue-title">
+    <nav class="fines__tabs" aria-label="Các mục quản lý khoản phạt">
+      <button type="button" :aria-current="activeTab === 'debts' ? 'page' : undefined" @click="selectTab('debts')">Công nợ</button>
+      <button v-if="canWaive || canRequestWaiver" type="button" :aria-current="activeTab === 'waivers' ? 'page' : undefined" @click="selectTab('waivers')">Đề nghị miễn giảm</button>
+      <button type="button" :aria-current="activeTab === 'receipts' ? 'page' : undefined" @click="selectTab('receipts')">Biên nhận</button>
+    </nav>
+
+    <section v-if="activeTab === 'waivers' && canWaive" class="fines__waivers" aria-labelledby="waiver-queue-title">
       <h2 id="waiver-queue-title">Đề nghị miễn giảm đang chờ</h2>
       <p v-if="!waivers?.items.length" class="empty-state">Không có đề nghị cần xem xét.</p>
       <article v-for="request in waivers?.items ?? []" :key="request.id" class="waiver-request">
@@ -165,7 +258,12 @@ watch(() => route.fullPath, () => {
       </article>
     </section>
 
-    <div class="fines__filters">
+    <div v-if="activeTab !== 'waivers'" class="fines__filters">
+      <form class="fines__search" @submit.prevent="navigate(1)">
+        <label>Tìm bạn đọc, email, mã thẻ hoặc mã cuốn<input v-model="searchText" type="search" maxlength="200" /></label>
+        <button type="submit">Tìm</button>
+        <button v-if="searchText" type="button" @click="searchText = ''; navigate(1)">Xóa tìm kiếm</button>
+      </form>
       <label>Trạng thái
         <select v-model="statusFilter" @change="navigate()">
           <option value="">Tất cả</option><option value="unpaid">Còn phải thu</option><option value="paid">Đã thanh toán</option><option value="waived">Đã miễn đủ</option>
@@ -175,7 +273,15 @@ watch(() => route.fullPath, () => {
     <div v-if="loading" class="empty-state" role="status">Đang tải khoản phạt…</div>
     <template v-else-if="fines">
       <p class="fines__count">{{ fines.total }} khoản</p>
-      <div v-if="fines.items.length" class="fines__list">
+      <div v-if="activeTab === 'receipts'" class="fines__list">
+        <article v-for="fine in fines.items" :key="fine.id" class="fine-card">
+          <h2>{{ fine.workTitle || 'Tài liệu' }}</h2>
+          <p>{{ fine.borrowerName || fine.borrowerId }} · {{ fine.copyCode || '—' }}</p>
+          <ul v-if="fine.payments.length"><li v-for="payment in fine.payments" :key="payment.id">{{ payment.receiptNumber }} · {{ payment.amount.toLocaleString('vi-VN') }} ₫ · {{ formatDate(payment.receivedAt) }} · {{ payment.receivedByName }} · <RouterLink :to="`/circulation/receipts/${payment.id}`">Mở biên nhận</RouterLink></li></ul>
+          <p v-else class="empty-state">Chưa có biên nhận trong khoản này.</p>
+        </article>
+      </div>
+      <div v-else-if="activeTab === 'debts' && fines.items.length" class="fines__list">
         <article v-for="fine in fines.items" :key="fine.id" class="fine-card">
           <div class="fine-card__head">
             <div><h2>{{ fine.workTitle || 'Tài liệu' }}</h2><p>{{ fine.borrowerName || fine.borrowerId }} · {{ fine.copyCode || '—' }}</p></div>
@@ -195,8 +301,9 @@ watch(() => route.fullPath, () => {
             <details v-if="canCollect && fine.remainingAmount > 0">
               <summary>Thu tiền</summary>
               <form @submit.prevent="collect(fine)">
-                <label>Số tiền thực thu<input v-model.number="paymentAmounts[fine.id]" type="number" min="1" :max="fine.remainingAmount" required /></label>
-                <button type="submit" :disabled="Boolean(pendingId)">{{ pendingId === fine.id ? 'Đang ghi nhận…' : 'Xác nhận thu' }}</button>
+                <label>Số tiền thực thu<input v-model.number="paymentAmounts[fine.id]" type="number" min="1" :max="fine.remainingAmount" :disabled="Boolean(paymentAttempts[fine.id])" required /></label>
+                <small v-if="paymentAttempts[fine.id]">Chưa nhận được kết quả lần gửi trước. Bấm thử lại để dùng cùng yêu cầu chống thu trùng.</small>
+                <button type="submit" :disabled="Boolean(pendingId)">{{ pendingId === fine.id ? 'Đang ghi nhận…' : paymentAttempts[fine.id] ? 'Thử xác nhận lại' : 'Xác nhận thu' }}</button>
               </form>
             </details>
             <details v-if="canRequestWaiver && fine.remainingAmount > 0 && !fine.waiverRequests.some((request) => request.status === 'pending')">
@@ -214,7 +321,7 @@ watch(() => route.fullPath, () => {
           </details>
         </article>
       </div>
-      <p v-else class="empty-state">Không có khoản phạt trong bộ lọc này.</p>
+      <p v-else-if="activeTab !== 'waivers'" class="empty-state">Không có khoản phạt hoặc biên nhận trong bộ lọc này.</p>
       <nav v-if="Math.ceil(fines.total / fines.pageSize) > 1" class="fines__pagination" aria-label="Phân trang khoản phạt">
         <button type="button" :disabled="fines.page <= 1 || loading" @click="navigate(page - 1)">Trang trước</button>
         <span>Trang {{ fines.page }} / {{ Math.ceil(fines.total / fines.pageSize) }}</span>
@@ -226,6 +333,9 @@ watch(() => route.fullPath, () => {
 
 <style scoped>
 .fines__heading { margin-bottom: 22px; }
+.fines__tabs { display: flex; gap: 8px; margin: 20px 0 12px; border-bottom: 1px solid var(--line); }
+.fines__tabs button { min-height: 40px; padding: 8px 14px; color: var(--muted); background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; cursor: pointer; }
+.fines__tabs button[aria-current="page"] { color: var(--navy); border-bottom-color: var(--navy); font-weight: 700; }
 .fines__heading h1 { margin: 7px 0 4px; }
 .fines__heading > p:last-child { margin: 0; color: var(--muted); }
 .fines__notice { padding: 11px 13px; color: #2f6451; background: #e8f5ed; border: 1px solid #c8e4d1; border-radius: 8px; font-size: .83rem; }

@@ -11,13 +11,16 @@ const loading = ref(false);
 const error = ref('');
 const query = ref(typeof route.query.q === 'string' ? route.query.q : '');
 const outcome = ref(typeof route.query.outcome === 'string' ? route.query.outcome : '');
+const targetType = ref(typeof route.query.targetType === 'string' ? route.query.targetType : '');
+const from = ref(typeof route.query.from === 'string' ? route.query.from : '');
+const to = ref(typeof route.query.to === 'string' ? route.query.to : '');
 const page = computed(() => Math.max(1, Number(route.query.page) || 1));
 const totalPages = computed(() => Math.max(1, Math.ceil((result.value?.total ?? 0) / (result.value?.pageSize ?? 20))));
 
 async function load(): Promise<void> {
   loading.value = true; error.value = '';
   try {
-    result.value = await listAuditEvents({ page: page.value, pageSize: 20, q: query.value.trim() || undefined, outcome: (outcome.value || undefined) as 'success' | 'failed' | undefined });
+    result.value = await listAuditEvents({ page: page.value, pageSize: 20, q: query.value.trim() || undefined, outcome: (outcome.value || undefined) as 'success' | 'failed' | undefined, targetType: targetType.value || undefined, from: from.value || undefined, to: to.value || undefined });
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Không tải được nhật ký thao tác.';
   } finally { loading.value = false; }
@@ -27,19 +30,35 @@ function applyFilters(nextPage = 1): void {
   void router.replace({ name: 'management-audit', query: {
     ...(query.value.trim() ? { q: query.value.trim() } : {}),
     ...(outcome.value ? { outcome: outcome.value } : {}),
+    ...(targetType.value ? { targetType: targetType.value } : {}),
+    ...(from.value ? { from: from.value } : {}),
+    ...(to.value ? { to: to.value } : {}),
     ...(nextPage > 1 ? { page: String(nextPage) } : {}),
   } });
 }
 
-watch(() => [route.query.q, route.query.outcome, route.query.page], () => {
+watch(() => [route.query.q, route.query.outcome, route.query.targetType, route.query.from, route.query.to, route.query.page], () => {
   query.value = typeof route.query.q === 'string' ? route.query.q : '';
   outcome.value = typeof route.query.outcome === 'string' ? route.query.outcome : '';
+  targetType.value = typeof route.query.targetType === 'string' ? route.query.targetType : '';
+  from.value = typeof route.query.from === 'string' ? route.query.from : '';
+  to.value = typeof route.query.to === 'string' ? route.query.to : '';
   void load();
 }, { immediate: true });
 
 function formatDate(value: string): string {
   return new Intl.DateTimeFormat('vi-VN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
 }
+const actionLabels: Record<string, string> = {
+  'circulation.loan.borrowed': 'Ghi nhận cho mượn', 'circulation.loan.returned': 'Ghi nhận nhận trả',
+  'loan.renew': 'Gia hạn khoản mượn', 'fine.collect': 'Thu khoản phạt', 'fine.waive': 'Miễn giảm khoản phạt',
+  'account.create': 'Tạo tài khoản', 'account.update': 'Cập nhật tài khoản', 'card.issue': 'Cấp thẻ bạn đọc',
+  'card.renew': 'Gia hạn thẻ bạn đọc', 'card.lock': 'Khóa thẻ bạn đọc', 'catalog.record.create': 'Tạo bản ghi tài liệu',
+  'catalog.record.update': 'Cập nhật bản ghi tài liệu', 'catalog.record.publish': 'Công bố bản ghi tài liệu',
+};
+function actionLabel(action: string): string { return actionLabels[action] ?? action.split(/[.:_]/).filter(Boolean).map((word) => word[0]?.toUpperCase() + word.slice(1)).join(' '); }
+const targetTypes = ['Account', 'Loan', 'Fine', 'LibraryCard', 'CatalogRecord', 'Copy', 'Reservation', 'DigitalSubmission', 'Incident', 'Policy', 'Location'];
+function targetLabel(targetTypeValue: string): string { return ({ Account: 'Tài khoản', Loan: 'Khoản mượn', Fine: 'Khoản phạt', LibraryCard: 'Thẻ bạn đọc', CatalogRecord: 'Bản ghi tài liệu', Copy: 'Bản sao', Reservation: 'Đặt trước', DigitalSubmission: 'Hồ sơ học liệu', Incident: 'Sự cố', Policy: 'Chính sách', Location: 'Vị trí kho' } as Record<string, string>)[targetTypeValue] ?? targetTypeValue; }
 </script>
 
 <template>
@@ -48,6 +67,8 @@ function formatDate(value: string): string {
     <form class="audit__filters" @submit.prevent="applyFilters(1)">
       <label>Tìm thao tác, người dùng hoặc đối tượng<input v-model="query" type="search" maxlength="200" placeholder="Ví dụ: circulation/loans" /></label>
       <label>Kết quả<select v-model="outcome"><option value="">Tất cả</option><option value="success">Thành công</option><option value="failed">Thất bại</option></select></label>
+      <label>Đối tượng<select v-model="targetType"><option value="">Tất cả đối tượng</option><option v-for="type in targetTypes" :key="type" :value="type">{{ targetLabel(type) }}</option></select></label>
+      <label>Từ ngày<input v-model="from" type="date" /></label><label>Đến ngày<input v-model="to" type="date" /></label>
       <button type="submit" :disabled="loading">{{ loading ? 'Đang tải…' : 'Lọc nhật ký' }}</button>
     </form>
     <p v-if="error" class="audit__error" role="alert">{{ error }}</p>
@@ -59,8 +80,8 @@ function formatDate(value: string): string {
           <thead><tr><th>Thời điểm</th><th>Người thực hiện</th><th>Thao tác</th><th>Đối tượng</th><th>Kết quả</th></tr></thead>
           <tbody>
             <tr v-for="event in result.items" :key="event.id">
-              <td>{{ formatDate(event.createdAt) }}</td><td>{{ event.actorName }}</td><td><code>{{ event.action }}</code></td>
-              <td><span>{{ event.targetType }}</span><code v-if="event.targetId">{{ event.targetId }}</code></td>
+              <td>{{ formatDate(event.createdAt) }}</td><td>{{ event.actorName }}</td><td><span>{{ actionLabel(event.action) }}</span><details><summary>Mã thao tác</summary><code>{{ event.action }}</code></details></td>
+              <td><span>{{ targetLabel(event.targetType) }}</span><details v-if="event.targetId"><summary>Mã đối tượng</summary><code>{{ event.targetId }}</code></details></td>
               <td><span class="audit__result" :class="event.outcome === 'success' ? 'audit__result--success' : 'audit__result--failed'">{{ event.outcome === 'success' ? 'Thành công' : 'Thất bại' }}</span></td>
             </tr>
             <tr v-if="result.items.length === 0"><td colspan="5" class="audit__empty">Chưa có sự kiện phù hợp.</td></tr>

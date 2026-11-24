@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue';
 import type { PolicyDto, PolicyScopeQuery, PolicyVersionCreate } from '@thu-vien/shared';
 import { getPolicy, listPolicyVersions, updatePolicy } from '../api';
+import { listLocations, listRecordsForPicker } from '@/features/holdings/api';
 
 const current = ref<PolicyDto | null>(null);
 const versions = ref<PolicyDto[]>([]);
@@ -9,6 +10,8 @@ const loading = ref(true);
 const saving = ref(false);
 const error = ref('');
 const notice = ref('');
+const classificationOptions = ref<string[]>([]);
+const locationOptions = ref<Array<{ code: string; name: string }>>([]);
 const scope = reactive({ readerGroup: '' as '' | NonNullable<PolicyScopeQuery['readerGroup']>, materialType: '', branchCode: '' });
 const dayOptions = [
   { value: 1, label: 'Thứ 2' }, { value: 2, label: 'Thứ 3' }, { value: 3, label: 'Thứ 4' },
@@ -56,6 +59,11 @@ async function load(): Promise<void> {
     const [active, history] = await Promise.all([getPolicy(scopeQuery.value), listPolicyVersions(scopeQuery.value)]);
     current.value = active;
     versions.value = history;
+    try {
+      const [records, locations] = await Promise.all([listRecordsForPicker(), listLocations({ pageSize: 100 })]);
+      classificationOptions.value = [...new Set(records.items.map((record) => record.classification?.trim()).filter((value): value is string => Boolean(value)))].sort();
+      locationOptions.value = locations.items.map((location) => ({ code: location.code, name: location.name }));
+    } catch { classificationOptions.value = []; locationOptions.value = []; }
     useCurrentValues(active);
     const tomorrow = new Date(Date.now() + 7 * 60 * 60 * 1000 + 86_400_000);
     form.effectiveOn = tomorrow.toISOString().slice(0, 10);
@@ -120,8 +128,12 @@ onMounted(() => void load());
               <option value="">Mọi nhóm</option><option value="student">Sinh viên</option><option value="lecturer">Giảng viên</option><option value="staff">Nhân viên</option><option value="other">Khác</option>
             </select>
           </label>
-          <label>Loại tài liệu / phân loại<input v-model="scope.materialType" maxlength="100" placeholder="Ví dụ: giáo trình" /></label>
-          <label>Cơ sở / mã địa điểm<input v-model="scope.branchCode" maxlength="100" placeholder="Để trống cho mọi cơ sở" /></label>
+          <label>Mã phân loại tài liệu
+            <select v-model="scope.materialType"><option value="">Mọi loại tài liệu</option><option v-if="scope.materialType && !classificationOptions.includes(scope.materialType)" :value="scope.materialType">{{ scope.materialType }} (đang xem)</option><option v-for="code in classificationOptions" :key="code" :value="code">{{ code }}</option></select>
+          </label>
+          <label>Cơ sở / mã vị trí
+            <select v-model="scope.branchCode"><option value="">Mọi cơ sở</option><option v-if="scope.branchCode && !locationOptions.some((location) => location.code === scope.branchCode)" :value="scope.branchCode">{{ scope.branchCode }} (đang xem)</option><option v-for="location in locationOptions" :key="location.code" :value="location.code">{{ location.name }} · {{ location.code }}</option></select>
+          </label>
           <button type="button" :disabled="loading" @click="load">Xem phạm vi</button>
         </div>
         <p class="policies__scope-preview">Đang xem: <strong>{{ scopeDescription }}</strong></p>
@@ -132,13 +144,14 @@ onMounted(() => void load());
         <div><span>Thời hạn mượn</span><strong>{{ current?.loanDays }} ngày</strong></div>
         <div><span>Số lượt gia hạn</span><strong>{{ current?.renewLimit }} lượt</strong></div>
       </section>
+      <p v-if="current && new Date(current.effectiveFrom).getUTCFullYear() < 2000" class="policies__legacy-date" role="note">Ngày hiệu lực hiện tại đang lưu là {{ formatDate(current.effectiveFrom) }}. Đây là dữ liệu cấu hình trong hệ thống; hãy xác nhận với quản lý trước khi lập phiên bản tiếp theo.</p>
 
       <section class="policies__panel">
         <h2>Lên lịch phiên bản tiếp theo</h2>
         <p class="policies__hint">Để trống mục không đổi; ngày hiệu lực phải là ngày trong tương lai.</p>
         <form class="policies__form" @submit.prevent="save">
           <label>Ngày hiệu lực<input v-model="form.effectiveOn" type="date" required /></label>
-          <label>Ngày mượn tối đa<input v-model.number="form.loanDays" type="number" min="1" max="365" required /></label>
+          <label>Thời hạn mượn (ngày)<input v-model.number="form.loanDays" type="number" min="1" max="365" required /></label>
           <label>Số lượt gia hạn<input v-model.number="form.renewLimit" type="number" min="0" max="10" required /></label>
           <label>Số ngày mỗi lần gia hạn<input v-model.number="form.renewDays" type="number" min="1" max="90" required /></label>
           <label>Số sách mượn tối đa<input v-model.number="form.maxActiveLoans" type="number" min="1" max="100" required /></label>
@@ -186,6 +199,7 @@ onMounted(() => void load());
 .policies__scope-fields input, .policies__scope-fields select { min-height: 40px; padding: 8px 10px; border: 1px solid var(--line, #dce3eb); border-radius: 7px; font: inherit; }
 .policies__scope-fields button { min-height: 40px; padding: 0 14px; color: white; background: var(--navy, #19365b); border: 0; border-radius: 7px; font: inherit; cursor: pointer; }
 .policies__scope-preview { color: var(--muted, #68778b); font-size: .84rem; }
+.policies__legacy-date { padding: 11px 13px; color: #76521d; background: #fff7e6; border: 1px solid #edd9ae; border-radius: 8px; font-size: .83rem; }
 .policies__current > div, .policies__panel { padding: 18px; background: white; border: 1px solid var(--line, #dce3eb); border-radius: 12px; }
 .policies__current span, .policies__current strong { display: block; }
 .policies__current span { color: var(--muted, #68778b); font-size: .8rem; }

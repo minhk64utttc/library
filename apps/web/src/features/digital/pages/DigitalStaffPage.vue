@@ -21,12 +21,20 @@ const query = ref('');
 const statusFilter = ref('');
 const page = ref(1);
 const expandedId = ref('');
+const expandedCardId = ref('');
 const events = ref<Record<string, Array<{ id: string; action: string; note: string | null; actorName: string; createdAt: string }>>>({});
 const notes = reactive<Record<string, string>>({});
 const accessLevels = reactive<Record<string, DigitalAccessLevel>>({});
 const statusLabels: Record<string, string> = {
   new_submission: 'Mới nộp', under_review: 'Đang thẩm định', need_more_info: 'Cần bổ sung', accepted: 'Đã tiếp nhận', published: 'Đã công bố',
 };
+const actionLabels: Record<string, string> = {
+  created: 'Tạo hồ sơ', file_uploaded: 'Tải tệp', metadata_updated: 'Cập nhật thông tin',
+  review_started: 'Bắt đầu thẩm định', more_info_requested: 'Yêu cầu bổ sung',
+  more_info_added: 'Bổ sung thông tin', accepted: 'Tiếp nhận', published: 'Công bố',
+  rejected: 'Từ chối', publication_withdrawn: 'Thu hồi công bố',
+};
+function actionLabel(action: string): string { return actionLabels[action] ?? `Cập nhật hồ sơ (${action.replaceAll('_', ' ')})`; }
 const totalPages = computed(() => Math.max(1, Math.ceil((result.value?.total ?? 0) / (result.value?.pageSize ?? 10))));
 
 async function load(nextPage = 1): Promise<void> {
@@ -92,6 +100,8 @@ onMounted(() => void load());
     <div v-else-if="result?.items.length" class="digital-staff__list">
       <article v-for="item in result.items" :key="item.id" class="digital-case">
         <div class="digital-case__top"><div><span class="digital-case__code">{{ item.submissionCode }}</span><h2>{{ item.title }}</h2><p>{{ item.author }}<span v-if="item.department"> · {{ item.department }}</span><span v-if="item.publishedYear"> · {{ item.publishedYear }}</span></p></div><span class="digital-case__status">{{ statusLabels[item.status] }}</span></div>
+        <button type="button" class="digital-case__expand" :aria-expanded="expandedCardId === item.id" @click="expandedCardId = expandedCardId === item.id ? '' : item.id">{{ expandedCardId === item.id ? 'Thu gọn hồ sơ' : 'Mở chi tiết và thao tác' }}</button>
+        <div v-if="expandedCardId === item.id" class="digital-case__body">
         <p class="digital-case__abstract">{{ item.abstract }}</p>
         <dl class="digital-case__metadata"><div><dt>Người nộp</dt><dd>{{ item.submitterName }}</dd></div><div><dt>Quyền sử dụng</dt><dd>{{ item.license }}</dd></div><div><dt>Tệp</dt><dd>{{ item.file ? `${item.file.originalName} · v${item.file.versionNumber}` : 'Chưa tải tệp' }}</dd></div></dl>
         <div class="digital-case__actions">
@@ -109,7 +119,8 @@ onMounted(() => void load());
           <button type="button" :disabled="busyId === item.id" @click="act(item, 'publish')">Công bố tài liệu</button>
           <p class="digital-case__access-note">Mức “Trong trường” hiện được bảo vệ như tài liệu hạn chế vì dự án chưa có xác minh thành viên qua SSO.</p>
         </div>
-        <div v-if="expandedId === item.id" class="digital-case__timeline"><h3>Lịch sử xử lý</h3><ol><li v-for="event in events[item.id] ?? []" :key="event.id"><strong>{{ event.action }}</strong><span>{{ event.actorName }} · {{ new Date(event.createdAt).toLocaleString('vi-VN') }}</span><p v-if="event.note">{{ event.note }}</p></li></ol><p v-if="events[item.id]?.length === 0">Chưa có sự kiện.</p></div>
+        <div v-if="expandedId === item.id" class="digital-case__timeline"><h3>Lịch sử xử lý</h3><ol><li v-for="event in events[item.id] ?? []" :key="event.id"><strong>{{ actionLabel(event.action) }}</strong><span>{{ event.actorName }} · {{ new Date(event.createdAt).toLocaleString('vi-VN') }}</span><p v-if="event.note">{{ event.note }}</p></li></ol><p v-if="events[item.id]?.length === 0">Chưa có sự kiện.</p></div>
+        </div>
       </article>
     </div>
     <p v-else-if="!loading" class="digital-staff__empty">Không có hồ sơ phù hợp với bộ lọc.</p>
@@ -135,6 +146,8 @@ onMounted(() => void load());
 .digital-case h2 { margin: 4px 0; color: var(--navy-deep); font-size: 1.05rem; }
 .digital-case__top p { margin: 5px 0; color: var(--muted); font-size: .8rem; }
 .digital-case__status { padding: 5px 9px; color: #344a64; background: #edf2fa; border-radius: 99px; font-size: .72rem; white-space: nowrap; }
+.digital-case__expand { margin-top: 10px; }
+.digital-case__body { padding-top: 4px; }
 .digital-case__abstract { color: #46566c; font-size: .83rem; line-height: 1.55; }
 .digital-case__metadata { display: flex; flex-wrap: wrap; gap: 10px 22px; margin: 12px 0; }
 .digital-case__metadata div { display: grid; gap: 3px; }

@@ -26,7 +26,9 @@ const statusFilter = ref<ReservationStatus | ''>('');
 const pendingId = ref<string | null>(null);
 const submitting = ref(false);
 
-const form = reactive({ borrowerId: '', editionId: '', search: '' });
+const form = reactive({ borrowerId: '', editionId: '', search: '', editionSearch: '' });
+const selectedBorrower = computed(() => borrowers.value.find((borrower) => borrower.id === form.borrowerId) ?? null);
+const cardStatusLabels: Record<BorrowerDto['cardStatus'], string> = { active: 'Thẻ còn hiệu lực', locked: 'Thẻ đang khóa', expired: 'Thẻ hết hạn', missing: 'Chưa có thẻ thư viện' };
 
 const STATUS_LABELS: Record<string, string> = {
   waiting: 'Đang chờ',
@@ -40,25 +42,14 @@ async function load(): Promise<void> {
   loading.value = true;
   errorMessage.value = '';
   try {
-    const [reservationResult, recordResult] = await Promise.all([
-      circApi.listReservations({
+    const reservationResult = await circApi.listReservations({
         page: page.value,
         pageSize: 20,
         ...(statusFilter.value ? { status: statusFilter.value } : {}),
-      }),
-      circApi.listEditionsForPicker(),
-    ]);
+      });
     reservations.value = reservationResult.items;
     total.value = reservationResult.total;
-    editionOptions.value = recordResult.items.flatMap((record) =>
-      record.editions.map((edition) => ({
-        id: edition.id,
-        label: `${record.title} — lần ${edition.editionNo ?? '?'}`,
-      })),
-    );
-    if (canManage.value) {
-      borrowers.value = await circApi.searchBorrowers('');
-    }
+    editionOptions.value = [];
   } catch {
     errorMessage.value = 'Không tải được dữ liệu đặt trước.';
   } finally {
@@ -69,9 +60,21 @@ async function load(): Promise<void> {
 async function onSearchBorrowers(): Promise<void> {
   try {
     borrowers.value = await circApi.searchBorrowers(form.search.trim());
-    form.borrowerId = borrowers.value[0]?.id ?? '';
+    form.borrowerId = '';
   } catch {
     errorMessage.value = 'Không tìm được bạn đọc.';
+  }
+}
+
+async function onSearchEditions(): Promise<void> {
+  try {
+    const result = await circApi.listEditionsForPicker(form.editionSearch.trim());
+    editionOptions.value = result.items.flatMap((record) => record.editions.map((edition) => ({
+      id: edition.id,
+      label: [record.title, edition.editionNo ? `Lần ${edition.editionNo}` : '', edition.publishYear ? String(edition.publishYear) : '', edition.isbn ? `ISBN ${edition.isbn}` : '', edition.publisherName ?? ''].filter(Boolean).join(' · '),
+    })));
+  } catch {
+    errorMessage.value = 'Không tìm được ấn bản phù hợp.';
   }
 }
 
@@ -152,16 +155,26 @@ watch(() => route.fullPath, () => {
         </label>
         <button type="submit">Tìm</button>
       </form>
+      <form class="row" @submit.prevent="onSearchEditions">
+        <label>Tìm ấn bản theo nhan đề, ISBN, tác giả
+          <input v-model="form.editionSearch" type="search" maxlength="200" />
+        </label>
+        <button type="submit">Tìm ấn bản</button>
+      </form>
       <form class="row" @submit.prevent="onCreate">
         <label>
           Bạn đọc
           <select v-model="form.borrowerId" required>
             <option value="">—</option>
             <option v-for="borrower in borrowers" :key="borrower.id" :value="borrower.id">
-              {{ borrower.fullName ?? borrower.email }}
+              {{ borrower.fullName ?? borrower.email }} · {{ borrower.cardNumber ?? 'Chưa có mã thẻ' }} · {{ cardStatusLabels[borrower.cardStatus] }}
             </option>
           </select>
         </label>
+        <p v-if="borrowers.length" class="reservations__hint">Hiển thị tối đa 20 kết quả. Thu hẹp theo tên, email hoặc mã thẻ.</p>
+        <p v-if="selectedBorrower" class="reservations__borrower" aria-live="polite">
+          {{ selectedBorrower.email }} · {{ cardStatusLabels[selectedBorrower.cardStatus] }} · Đang mượn {{ selectedBorrower.activeLoanCount }} cuốn · {{ selectedBorrower.unpaidFineCount }} khoản phạt chưa thu
+        </p>
         <label>
           Ấn bản
           <select v-model="form.editionId" required>
@@ -171,7 +184,7 @@ watch(() => route.fullPath, () => {
             </option>
           </select>
         </label>
-        <button type="submit" :disabled="submitting">Đặt trước</button>
+        <button type="submit" :disabled="submitting || selectedBorrower?.cardStatus !== 'active'">Đặt trước</button>
       </form>
       <button type="button" @click="onExpireDue">Xử lý giữ chỗ hết hạn</button>
     </fieldset>

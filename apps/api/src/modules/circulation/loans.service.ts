@@ -178,6 +178,19 @@ export class LoansService {
         await tx.reservation.update({ where: { id: hold.id }, data: { status: 'fulfilled' } });
       }
 
+      await tx.notification.create({
+        data: {
+          accountId: loan.borrowerId,
+          loanId: loan.id,
+          dedupeKey: `loan-borrowed:${loan.id}`,
+          subject: 'Đã ghi nhận mượn tài liệu',
+          body: `Thư viện đã ghi nhận mượn “${loan.copy.edition.work.title}” (mã cuốn ${loan.copy.code}). Hạn trả: ${new Intl.DateTimeFormat('vi-VN', { dateStyle: 'long', timeZone: 'Asia/Bangkok' }).format(loan.dueAt)}.`,
+          recipientEmail: null,
+          status: 'skipped',
+          sentAt: now,
+        },
+      });
+
       return loan;
     });
 
@@ -232,7 +245,20 @@ export class LoansService {
         await this.availability.release(tx, current.copyId, current.copy.editionId, now);
       }
 
-      return tx.loan.findUniqueOrThrow({ where: { id: loanId }, include: LOAN_INCLUDE });
+      const returnedLoan = await tx.loan.findUniqueOrThrow({ where: { id: loanId }, include: LOAN_INCLUDE });
+      await tx.notification.create({
+        data: {
+          accountId: returnedLoan.borrowerId,
+          loanId: returnedLoan.id,
+          dedupeKey: `loan-return:${returnedLoan.id}`,
+          subject: 'Đã nhận trả tài liệu',
+          body: `Thư viện đã nhận trả “${returnedLoan.copy.edition.work.title}” (mã cuốn ${returnedLoan.copy.code}).${fineAmount > 0 ? ` Khoản phạt quá hạn ${fineAmount.toLocaleString('vi-VN')} ₫ đã được ghi nhận trong tài khoản.` : ''}`,
+          recipientEmail: null,
+          status: 'skipped',
+          sentAt: now,
+        },
+      });
+      return returnedLoan;
     });
 
     return this.toDto(loan, now);
@@ -303,7 +329,20 @@ export class LoansService {
       await tx.auditEvent.create({
         data: { actorId, action: 'loan.renew', targetType: 'Loan', targetId: loanId, outcome: 'success' },
       });
-      return tx.loan.findUniqueOrThrow({ where: { id: renewedLoan.id }, include: LOAN_INCLUDE });
+      const result = await tx.loan.findUniqueOrThrow({ where: { id: renewedLoan.id }, include: LOAN_INCLUDE });
+      await tx.notification.create({
+        data: {
+          accountId: result.borrowerId,
+          loanId: result.id,
+          dedupeKey: `loan-renewed:${loanId}:${result.renewCount}`,
+          subject: 'Đã gia hạn khoản mượn',
+          body: `Thư viện đã gia hạn “${result.copy.edition.work.title}” (mã cuốn ${result.copy.code}). Hạn trả mới: ${new Intl.DateTimeFormat('vi-VN', { dateStyle: 'long', timeZone: 'Asia/Bangkok' }).format(result.dueAt)}.`,
+          recipientEmail: null,
+          status: 'skipped',
+          sentAt: now,
+        },
+      });
+      return result;
     });
 
     return this.toDto(loan, now);

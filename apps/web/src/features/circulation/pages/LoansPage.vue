@@ -27,6 +27,7 @@ const copyOptions = ref<LoanCopyOption[]>([]);
 const copy = ref<LoanCopyOption | null>(null);
 const returnCode = ref('');
 const returnPreview = ref<LoanDto | null>(null);
+const lastBorrowedLoan = ref<LoanDto | null>(null);
 const searching = ref('');
 let borrowerRequest = 0;
 let copyRequest = 0;
@@ -98,7 +99,10 @@ async function findCopy(exact = false): Promise<void> {
     if (request !== copyRequest) return;
     copyOptions.value = options;
     const match = options.find((item) => item.code.toLowerCase() === term.toLowerCase());
-    if (exact && match) selectCopy(match);
+    if (exact && match) {
+      selectCopy(match);
+      if (borrower.value) void borrow();
+    }
     else if (exact && !options.length) error.value = 'Không tìm thấy cuốn có thể cho mượn với mã này.';
   } catch (cause) { if (request === copyRequest) error.value = message(cause); }
   finally { if (request === copyRequest) searching.value = ''; }
@@ -117,10 +121,11 @@ async function borrow(): Promise<void> {
   const selectedCopy = copy.value;
   if (!selectedBorrower || !selectedCopy || pending.value) return;
   await run('borrow', async () => {
-    await api.borrow({ borrowerId: selectedBorrower.id, copyId: selectedCopy.id });
+    lastBorrowedLoan.value = await api.borrow({ borrowerId: selectedBorrower.id, copyId: selectedCopy.id });
     selectedBorrower.activeLoanCount += 1; copy.value = null; copyTerm.value = ''; copyOptions.value = [];
   }, 'Đã cho mượn tài liệu. Có thể quét cuốn tiếp theo.');
 }
+function printBorrowSlip(): void { window.print(); }
 async function lookupReturn(): Promise<void> {
   if (!returnCode.value.trim() || pending.value) return;
   returnPreview.value = null; error.value = ''; pending.value = 'lookup-return';
@@ -134,6 +139,30 @@ async function lookupReturn(): Promise<void> {
 async function receive(loan: LoanDto): Promise<void> {
   await run(loan.id, async () => { await api.returnLoan(loan.id); if (borrower.value?.id === loan.borrowerId) borrower.value.activeLoanCount = Math.max(0, borrower.value.activeLoanCount - 1); returnPreview.value = null; returnCode.value = ''; }, `Đã nhận trả ${loan.copyCode}.`);
 }
+async function exportOverdue(): Promise<void> {
+  error.value = ''; notice.value = '';
+  try {
+    const rows: LoanDto[] = [];
+    let currentPage = 1;
+    let pages = 1;
+    do {
+      const data = await api.listLoans({ page: currentPage, pageSize: 100, status: 'active', overdue: true, sort: 'due_asc' });
+      rows.push(...data.items); pages = Math.ceil(data.total / 100); currentPage += 1;
+    } while (currentPage <= pages && rows.length < 20_000);
+    const cell = (value: unknown): string => {
+      let text = value == null ? '' : String(value);
+      if (/^[\s]*[=+\-@]/.test(text)) text = `'${text}`;
+      return `"${text.replaceAll('"', '""')}"`;
+    };
+    const csvRows: unknown[][] = [
+      ['Mã bạn đọc', 'Bạn đọc', 'Mã cuốn', 'Tài liệu', 'Ngày mượn', 'Hạn trả', 'Quá hạn (ngày)', 'Tiền phạt (VND)'],
+      ...rows.map((loan) => [loan.borrowerId, loan.borrowerName, loan.copyCode, loan.workTitle, loan.borrowedAt, loan.dueAt, loan.overdueDays, loan.fineAmount]),
+    ];
+    const blob = new Blob([`\uFEFF${csvRows.map((row) => row.map(cell).join(',')).join('\r\n')}`], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'ban-doc-qua-han.csv'; anchor.click(); URL.revokeObjectURL(url);
+    notice.value = `Đã xuất ${rows.length.toLocaleString('vi-VN')} khoản mượn quá hạn${rows.length >= 20_000 ? ' (đã chạm giới hạn 20.000 dòng)' : ''}.`;
+  } catch (cause) { error.value = message(cause); }
+}
 watch(() => route.fullPath, () => void load());
 onMounted(() => void load());
 onBeforeUnmount(() => { clearTimeout(borrowerTimer); clearTimeout(copyTimer); ++borrowerRequest; ++copyRequest; ++listRequest; });
@@ -141,8 +170,10 @@ onBeforeUnmount(() => { clearTimeout(borrowerTimer); clearTimeout(copyTimer); ++
 
 <template>
   <section class="loans">
-    <header><p class="eyebrow">Mượn – Trả</p><h1>Cho mượn / Nhận trả</h1><p>Quét bằng máy quét hoặc gõ mã rồi nhấn Enter.</p></header>
+    <header><p class="eyebrow">Mượn – Trả</p><h1>Cho mượn / Nhận trả</h1><p>Quét mã thẻ, sau đó quét mã cuốn và nhấn Enter để ghi nhận nhanh.</p><button v-if="canManage" type="button" @click="exportOverdue">Xuất bạn đọc quá hạn / tiền phạt CSV</button></header>
     <p v-if="error" role="alert">{{ error }}</p><p v-if="notice" class="loan-notice" role="status">{{ notice }}</p>
+    <button v-if="lastBorrowedLoan" type="button" class="loan-print-button" @click="printBorrowSlip">In phiếu hẹn trả / Lưu PDF</button>
+    <article v-if="lastBorrowedLoan" class="loan-print-slip"><h1>PHIẾU MƯỢN TÀI LIỆU</h1><p><strong>Bạn đọc:</strong> {{ lastBorrowedLoan.borrowerName || '—' }}</p><p><strong>Mã cuốn:</strong> {{ lastBorrowedLoan.copyCode }}</p><p><strong>Tài liệu:</strong> {{ lastBorrowedLoan.workTitle || '—' }}</p><p><strong>Ngày mượn:</strong> {{ date(lastBorrowedLoan.borrowedAt) }}</p><p><strong>Hạn trả:</strong> {{ date(lastBorrowedLoan.dueAt) }}</p><p>Vui lòng trả tài liệu đúng hạn tại quầy thư viện.</p></article>
     <div v-if="canManage" class="loan-counter">
       <fieldset><legend>Cho mượn tài liệu</legend>
         <form @submit.prevent="findBorrower(true)"><label for="borrower-search">1. Quét mã thẻ hoặc tìm tên, email</label><div class="loan-search"><input id="borrower-search" v-model="borrowerTerm" autocomplete="off" @input="borrowerInput" @keydown.esc="borrowerOptions = []" /><button :disabled="searching === 'borrower'" type="submit">Tìm bạn đọc</button></div></form>
@@ -182,6 +213,8 @@ onBeforeUnmount(() => { clearTimeout(borrowerTimer); clearTimeout(copyTimer); ++
 .loan-chips { display:flex;flex-wrap:wrap;gap:7px;margin:16px 0; }.loan-chips button { border-radius:999px;font-size:.8rem;background:#edf2fb;color:var(--navy); }
 .loan-table { overflow:auto; }.loan-table small { display:block;max-width:230px;margin-top:4px;color:var(--muted); }.loan-table th button { padding:0;background:transparent;color:inherit;border:0; }.loan-actions { display:flex;gap:6px;flex-wrap:wrap; }.loan-actions button { font-size:.8rem; }
 .loan-pagination { display:flex;justify-content:center;align-items:center;gap:16px;margin-top:20px; }.loan-skeleton { display:grid;gap:12px;margin:20px 0; }.loan-skeleton span { height:55px;background:#edf1f6;border-radius:6px; }
+.loan-print-slip { display:none; }
+@media print { :global(body *) { visibility:hidden !important; } .loan-print-slip,.loan-print-slip * { visibility:visible !important; } .loan-print-slip { display:block;position:absolute;inset:0 auto auto 0;width:100%;padding:24px;color:#111;background:#fff;font:14pt/1.5 Arial,sans-serif; } .loan-print-slip h1 { text-align:center;font-size:20pt; }.loan-print-button { display:none; } }
 @media(max-width:900px) { .loan-counter { grid-template-columns:1fr; } }
 @media(max-width:600px) { .loan-table table { min-width:0;width:100%; } .loan-search { flex-direction:column; }.loan-table table,.loan-table tbody,.loan-table tr,.loan-table td { display:block; }.loan-table thead { display:none; }.loan-table tr { padding:14px 0;border-bottom:1px solid var(--line); }.loan-table td { padding:7px;border:0; }.loan-table td::before { content:attr(data-label);display:block;color:var(--muted);font-size:.7rem;margin-bottom:3px; }.loan-pagination { gap:8px;font-size:.8rem; } }
 </style>

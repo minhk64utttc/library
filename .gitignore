@@ -9,5 +9,6 @@ coverage/
 .DS_Store
 Thumbs.db
 .vite/
+/data/
 apps/api/src/generated/
 packages/shared/dist/

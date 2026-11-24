@@ -10,8 +10,12 @@ export class AuditService {
 
   async list(query: AuditQuery): Promise<Paginated<AuditEventDto>> {
     const term = query.q?.trim();
+    const fromDate = query.from ? new Date(`${query.from}T00:00:00.000+07:00`) : undefined;
+    const toDate = query.to ? new Date(new Date(`${query.to}T00:00:00.000+07:00`).getTime() + 86_400_000) : undefined;
     const where: Prisma.AuditEventWhereInput = {
       ...(query.outcome ? { outcome: query.outcome } : {}),
+      ...(query.targetType ? { targetType: query.targetType } : {}),
+      ...(fromDate || toDate ? { createdAt: { ...(fromDate ? { gte: fromDate } : {}), ...(toDate ? { lt: toDate } : {}) } } : {}),
       ...(term ? { OR: [
         { action: { contains: term, mode: 'insensitive' } },
         { targetType: { contains: term, mode: 'insensitive' } },

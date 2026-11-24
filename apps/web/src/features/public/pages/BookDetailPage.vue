@@ -5,6 +5,7 @@ import type { PublicRecordDto } from '@thu-vien/shared';
 import { useSessionStore } from '@/features/auth/session.store';
 import { ApiError } from '@/shared/api/client';
 import { createReservation, getRecord } from '../api';
+import { languageLabel } from '@/shared/language-label';
 
 const route = useRoute();
 const session = useSessionStore();
@@ -84,7 +85,7 @@ onMounted(async () => {
           <div class="book-detail__edition-head">
             <div>
               <h3>{{ edition.editionNo ? `Ấn bản ${edition.editionNo}` : 'Ấn bản' }}</h3>
-              <p>{{ [edition.publisherName, edition.publishYear, edition.language].filter(Boolean).join(' · ') || 'Chưa có thông tin xuất bản' }}</p>
+              <p>{{ [edition.publisherName, edition.publishYear, languageLabel(edition.language)].filter(Boolean).join(' · ') || 'Chưa có thông tin xuất bản' }}</p>
             </div>
             <span class="status-badge" :data-state="edition.availableCount ? 'available' : 'reserved'">
               {{ edition.availableCount }} / {{ edition.totalCount }} bản sẵn sàng

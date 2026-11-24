@@ -10,6 +10,11 @@ const session = useSessionStore();
 const canWrite = computed(() => session.can('catalog:write'));
 
 const publishers = ref<PublisherDto[]>([]);
+const searchText = ref('');
+const page = ref(1);
+const total = ref(0);
+const pageSize = 20;
+const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)));
 const loading = ref(false);
 const errorMessage = ref('');
 const submitting = ref(false);
@@ -18,12 +23,14 @@ const editingId = ref<string | null>(null);
 const createForm = reactive({ code: '', name: '', address: '' });
 const editForm = reactive({ code: '', name: '', address: '' });
 
-async function load(): Promise<void> {
+async function load(nextPage = page.value): Promise<void> {
+  page.value = nextPage;
   loading.value = true;
   errorMessage.value = '';
   try {
-    const result = await catalogApi.listPublishers({ pageSize: 100 });
+    const result = await catalogApi.listPublishers({ page: page.value, pageSize, q: searchText.value.trim() || undefined });
     publishers.value = result.items;
+    total.value = result.total;
   } catch {
     errorMessage.value = 'Không tải được danh sách nhà xuất bản.';
   } finally {
@@ -97,6 +104,13 @@ onMounted(() => {
 
     <p v-if="errorMessage" role="alert">{{ errorMessage }}</p>
 
+    <form class="publishers__search" @submit.prevent="load(1)">
+      <label>Tìm theo tên hoặc mã nhà xuất bản<input v-model="searchText" type="search" maxlength="200" /></label>
+      <button type="submit">Tìm</button>
+      <button type="button" :disabled="!searchText" @click="searchText = ''; load(1)">Xóa lọc</button>
+    </form>
+    <p aria-live="polite">{{ total }} nhà xuất bản</p>
+
     <form v-if="canWrite" class="publishers__create" @submit.prevent="onCreate">
       <label>
         Mã
@@ -149,5 +163,10 @@ onMounted(() => {
         </tr>
       </tbody>
     </table>
+    <nav v-if="pageCount > 1" class="publishers__pagination" aria-label="Phân trang nhà xuất bản">
+      <button type="button" :disabled="page <= 1 || loading" @click="load(page - 1)">Trang trước</button>
+      <span>Trang {{ page }} / {{ pageCount }}</span>
+      <button type="button" :disabled="page >= pageCount || loading" @click="load(page + 1)">Trang sau</button>
+    </nav>
   </section>
 </template>

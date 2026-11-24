@@ -1,5 +1,9 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { createHash, randomUUID } from 'node:crypto';
+import { basename, join, resolve } from 'node:path';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import sharp from 'sharp';
 import type {
   IncidentCreate,
   IncidentDecisionInput,
@@ -19,9 +23,16 @@ const INCIDENT_INCLUDE = {
   copy: { include: { edition: { include: { work: true } } } },
   reportedBy: { include: { profile: true } },
   decidedBy: { include: { profile: true } },
+  attachments: { orderBy: { createdAt: 'asc' as const } },
 } as const;
 
 type IncidentWithRelations = Prisma.IncidentGetPayload<{ include: typeof INCIDENT_INCLUDE }>;
+type UploadedIncidentImage = { buffer: Buffer; mimetype: string; size: number; originalname: string };
+const MAX_ATTACHMENT_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_ATTACHMENTS_PER_REQUEST = 3;
+const MAX_ATTACHMENTS_PER_INCIDENT = 6;
+const INCIDENT_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const incidentStorageRoot = resolve(process.env.DOCUMENT_STORAGE_PATH ?? join(process.cwd(), '.private', 'digital'), 'incident-attachments');
 
 export interface IncidentListQuery extends PageQuery {
   status?: IncidentStatus;
@@ -105,6 +116,73 @@ export class IncidentsService {
       return incident;
     });
     return this.toDto(created);
+  }
+
+  async uploadAttachments(id: string, actorId: string, files: UploadedIncidentImage[]) {
+    if (!files.length || files.length > MAX_ATTACHMENTS_PER_REQUEST) {
+      throw new BadRequestException({ code: 'INVALID_ATTACHMENT_COUNT', message: 'Chọn từ 1 đến 3 ảnh cho mỗi lần tải.' });
+    }
+    const normalized = await Promise.all(files.map((file) => this.normalizeImage(file)));
+    const storedFiles: Array<{ storageKey: string; destination: string }> = [];
+    await mkdir(incidentStorageRoot, { recursive: true, mode: 0o700 });
+
+    try {
+      for (const image of normalized) {
+        const storageKey = randomUUID();
+        const destination = this.attachmentPath(storageKey);
+        await writeFile(destination, image.buffer, { flag: 'wx', mode: 0o600 });
+        storedFiles.push({ storageKey, destination });
+        image.storageKey = storageKey;
+      }
+
+      const attachments = await this.prisma.$transaction(async (tx) => {
+        const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Incident" WHERE id = ${id} FOR UPDATE`;
+        if (!locked.length) this.notFound();
+        const current = await tx.incident.findUniqueOrThrow({ where: { id }, select: { status: true } });
+        if (current.status === 'resolved') {
+          throw new ConflictException({ code: 'INCIDENT_RESOLVED', message: 'Không thể thêm ảnh vào hồ sơ đã xử lý.' });
+        }
+        const currentCount = await tx.incidentAttachment.count({ where: { incidentId: id } });
+        if (currentCount + normalized.length > MAX_ATTACHMENTS_PER_INCIDENT) {
+          throw new BadRequestException({ code: 'ATTACHMENT_LIMIT', message: 'Mỗi hồ sơ lưu tối đa 6 ảnh.' });
+        }
+        return Promise.all(normalized.map((image) => tx.incidentAttachment.create({
+          data: {
+            incidentId: id,
+            uploaderId: actorId,
+            storageKey: image.storageKey!,
+            originalName: image.originalName,
+            mimeType: 'image/jpeg',
+            sizeBytes: image.buffer.length,
+            checksumSha256: createHash('sha256').update(image.buffer).digest('hex'),
+          },
+        })));
+      });
+      return attachments.map((attachment) => ({
+        id: attachment.id,
+        originalName: attachment.originalName,
+        mimeType: 'image/jpeg' as const,
+        sizeBytes: attachment.sizeBytes,
+        createdAt: attachment.createdAt.toISOString(),
+      }));
+    } catch (error) {
+      await Promise.all(storedFiles.map(({ destination }) => unlink(destination).catch(() => undefined)));
+      throw error;
+    }
+  }
+
+  async attachment(incidentId: string, attachmentId: string) {
+    const attachment = await this.prisma.incidentAttachment.findFirst({ where: { id: attachmentId, incidentId } });
+    if (!attachment) this.notFound();
+    try {
+      return {
+        buffer: await readFile(this.attachmentPath(attachment.storageKey)),
+        originalName: attachment.originalName,
+        mimeType: attachment.mimeType,
+      };
+    } catch {
+      throw new NotFoundException({ code: 'ATTACHMENT_NOT_FOUND', message: 'Không tìm thấy ảnh đính kèm.' });
+    }
   }
 
   async addInfo(id: string, input: IncidentInfo, actorId: string): Promise<IncidentDto> {
@@ -255,6 +333,45 @@ export class IncidentsService {
       decidedByName: row.decidedBy?.profile?.fullName ?? row.decidedBy?.email ?? null,
       createdAt: row.createdAt.toISOString(),
       decidedAt: row.decidedAt?.toISOString() ?? null,
+      attachments: row.attachments.map((attachment) => ({
+        id: attachment.id,
+        originalName: attachment.originalName,
+        mimeType: 'image/jpeg' as const,
+        sizeBytes: attachment.sizeBytes,
+        createdAt: attachment.createdAt.toISOString(),
+      })),
     };
+  }
+
+  private async normalizeImage(file: UploadedIncidentImage) {
+    if (!file.buffer?.length || file.size !== file.buffer.length || file.size > MAX_ATTACHMENT_FILE_BYTES || !INCIDENT_IMAGE_MIME_TYPES.has(file.mimetype)) {
+      throw new BadRequestException({ code: 'INVALID_INCIDENT_IMAGE', message: 'Chọn ảnh JPEG, PNG hoặc WebP tối đa 5 MB.' });
+    }
+    try {
+      const image = sharp(file.buffer, { limitInputPixels: 20_000_000, failOn: 'warning' });
+      const metadata = await image.metadata();
+      const detectedMimeType = metadata.format === 'jpeg' ? 'image/jpeg' : metadata.format === 'png' ? 'image/png' : metadata.format === 'webp' ? 'image/webp' : '';
+      if (!detectedMimeType || detectedMimeType !== file.mimetype || (metadata.pages ?? 1) > 1) throw new Error('Unsupported image content.');
+      const buffer = await image.rotate().resize({ width: 2000, height: 2000, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 84 }).toBuffer();
+      const safeName = basename(file.originalname.replace(/\\/g, '/'))
+        .split('')
+        .filter((character) => {
+          const code = character.charCodeAt(0);
+          return code >= 0x20 && code !== 0x7f;
+        })
+        .join('')
+        .slice(0, 220) || 'anh-su-co';
+      return { buffer, originalName: safeName, storageKey: '' };
+    } catch {
+      throw new BadRequestException({ code: 'INVALID_INCIDENT_IMAGE_CONTENT', message: 'Tệp không phải ảnh hợp lệ hoặc ảnh vượt giới hạn xử lý.' });
+    }
+  }
+
+  private attachmentPath(storageKey: string): string {
+    const path = resolve(incidentStorageRoot, `${storageKey}.jpg`);
+    if (!path.startsWith(`${incidentStorageRoot}/`) && !path.startsWith(`${incidentStorageRoot}\\`)) {
+      throw new BadRequestException({ code: 'INVALID_ATTACHMENT_KEY', message: 'Khóa ảnh không hợp lệ.' });
+    }
+    return path;
   }
 }

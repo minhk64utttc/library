@@ -43,7 +43,7 @@ Script mới là `apps/api/prisma/seed-demo.cjs`, helper tệp số là `demo-di
 
 Script dùng một transaction và advisory lock; marker hoàn thành khiến lần chạy sau không thêm trùng và không đặt lại các dữ liệu đã thử sửa. Không dùng script seed cũ để nạp lại vì script cũ có chức năng đặt lại tài khoản mẫu mặc định. Không xóa marker để ép chạy lại.
 
-Thông tin đăng nhập được ghi thành công vào file riêng trước khi tạo tài khoản. Nếu transaction thất bại, chỉ file credentials vừa được script tạo mới được dọn đi; file đã tồn tại không bị ghi đè. Tệp PDF lưu riêng trong volume tài liệu, kiểm tra checksum trước khi tái sử dụng.
+Thông tin đăng nhập được ghi thành công vào file riêng trước khi tạo tài khoản. Nếu transaction thất bại, chỉ file credentials vừa được script tạo mới được dọn đi; file đã tồn tại không bị ghi đè. Khi chạy Compose, file nằm tại `data/demo-credentials/login.txt`, PDF ở `data/documents/`, database ở `data/postgres/`; toàn bộ `data/` được loại khỏi Git bằng `.gitignore`.
 
 Kiểm tra đã chạy: schema PostgreSQL riêng, chạy lại không trùng, đối chiếu dữ liệu cũ, điều kiện thẻ/ngày công bố/gia hạn, quan hệ cuốn–khoản mượn–đặt trước, số dư thu/miễn, snapshot kiểm kê và checksum 24 PDF. Script kiểm tra là `apps/api/prisma/check-demo.cjs`.
 

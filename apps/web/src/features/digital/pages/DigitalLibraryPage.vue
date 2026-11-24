@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import type { Paginated } from '@thu-vien/shared';
+import { useSessionStore } from '@/features/auth/session.store';
 import { downloadDigitalFile, downloadPublicDigitalFile, listMemberDigitalRecords, listPublicDigitalRecords, type DigitalMemberRecord, type DigitalPublicRecord } from '../api';
 
 const result = ref<Paginated<DigitalPublicRecord> | null>(null);
+const session = useSessionStore();
 const memberItems = ref<DigitalMemberRecord[]>([]);
 const memberPage = ref(1);
 const memberTotal = ref(0);
+const memberAccess = ref(false);
 const query = ref('');
 const activeQuery = ref('');
 const page = ref(1);
@@ -21,9 +24,11 @@ async function load(nextPage = 1): Promise<void> {
     result.value = await listPublicDigitalRecords({ page: nextPage, pageSize: 12, q: activeQuery.value || undefined });
     try {
       const members = await listMemberDigitalRecords({ page: memberPage.value, pageSize: 12, q: activeQuery.value || undefined });
+      memberAccess.value = true;
       memberItems.value = members.items.filter((item) => item.accessLevel === 'members_only');
       memberTotal.value = members.total;
     } catch {
+      memberAccess.value = false;
       memberItems.value = [];
       memberTotal.value = 0;
     }
@@ -76,7 +81,7 @@ onMounted(() => void load());
     <p v-if="error" class="digital-library__error" role="alert">{{ error }}</p>
     <p v-if="loading" class="digital-library__empty" role="status">Đang tìm trong kho học liệu…</p>
     <template v-else-if="result">
-      <p class="digital-library__count">{{ result.total }} tài liệu công khai</p>
+      <p class="digital-library__count">Kết quả: <strong>{{ result.total }}</strong> tài liệu công khai<span v-if="memberAccess"> · <strong>{{ memberTotal }}</strong> tài liệu thành viên</span></p>
       <div v-if="result.items.length" class="digital-library__grid">
         <article v-for="record in result.items" :key="record.submissionCode" class="digital-record">
           <span class="digital-record__eyebrow">{{ record.submissionCode }}<span v-if="record.publishedYear"> · {{ record.publishedYear }}</span></span>
@@ -86,12 +91,13 @@ onMounted(() => void load());
           <div class="digital-record__footer"><span>{{ record.license }}</span><button type="button" :disabled="downloading === record.submissionCode" @click="download(record)">{{ downloading === record.submissionCode ? 'Đang tải…' : 'Tải tài liệu' }}</button></div>
         </article>
       </div>
-      <p v-else class="digital-library__empty">Không tìm thấy tài liệu công khai phù hợp.</p>
+      <p v-else class="digital-library__empty">Không tìm thấy tài liệu công khai phù hợp với từ khóa này.</p>
       <nav v-if="pages > 1" class="digital-library__pagination" aria-label="Phân trang học liệu số"><button type="button" :disabled="page <= 1" @click="load(page - 1)">Trước</button><span>Trang {{ page }} / {{ pages }}</span><button type="button" :disabled="page >= pages" @click="load(page + 1)">Sau</button></nav>
     </template>
-    <section v-if="memberItems.length || memberTotal" class="digital-members" aria-labelledby="digital-members-title">
+    <section v-if="memberAccess" class="digital-members" aria-labelledby="digital-members-title">
       <h2 id="digital-members-title">Học liệu dành cho bạn đọc</h2>
-      <p class="digital-members__hint">Đăng nhập để xem tài liệu được giới hạn cho thành viên thư viện.</p>
+      <p class="digital-members__hint">{{ session.isAuthenticated ? 'Bạn đã đăng nhập. Các tài liệu dưới đây được hiển thị theo quyền của tài khoản.' : 'Đăng nhập để xem và tải tài liệu giới hạn cho thành viên thư viện.' }}</p>
+      <p class="digital-library__count">{{ memberTotal }} tài liệu thành viên phù hợp</p>
       <div class="digital-library__grid">
         <article v-for="record in memberItems" :key="record.submissionId" class="digital-record">
           <span class="digital-record__eyebrow">{{ record.submissionCode }}<span v-if="record.publishedYear"> · {{ record.publishedYear }}</span></span>
@@ -101,6 +107,7 @@ onMounted(() => void load());
           <div class="digital-record__footer"><span>{{ record.license }} · Thành viên</span><button type="button" :disabled="!record.fileId || downloading === record.submissionCode" @click="downloadMember(record)">{{ downloading === record.submissionCode ? 'Đang tải…' : 'Tải tài liệu' }}</button></div>
         </article>
       </div>
+      <p v-if="!memberItems.length" class="digital-library__empty">Không tìm thấy tài liệu thành viên phù hợp với từ khóa này.</p>
       <nav v-if="Math.ceil(memberTotal / 12) > 1" class="digital-library__pagination" aria-label="Phân trang học liệu thành viên">
         <button type="button" :disabled="memberPage <= 1" @click="loadMembers(memberPage - 1)">Trước</button><span>Trang {{ memberPage }} / {{ Math.ceil(memberTotal / 12) }}</span><button type="button" :disabled="memberPage >= Math.ceil(memberTotal / 12)" @click="loadMembers(memberPage + 1)">Sau</button>
       </nav>

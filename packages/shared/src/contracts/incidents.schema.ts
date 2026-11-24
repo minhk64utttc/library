@@ -49,4 +49,13 @@ export interface IncidentDto {
   decidedByName: string | null;
   createdAt: string;
   decidedAt: string | null;
+  attachments: IncidentAttachmentDto[];
+}
+
+export interface IncidentAttachmentDto {
+  id: string;
+  originalName: string;
+  mimeType: 'image/jpeg';
+  sizeBytes: number;
+  createdAt: string;
 }

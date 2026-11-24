@@ -10,6 +10,11 @@ export const recordListQuerySchema = pageQuerySchema.extend({
 });
 export type RecordListQuery = z.infer<typeof recordListQuerySchema>;
 
+export const publisherListQuerySchema = pageQuerySchema.extend({
+  q: z.string().trim().max(200).optional(),
+});
+export type PublisherListQuery = z.infer<typeof publisherListQuerySchema>;
+
 export const publisherInputSchema = z.object({
   code: z.string().min(1).max(50),
   name: z.string().min(1).max(200),

@@ -102,8 +102,10 @@ export function listAvailableCopies(): Promise<Paginated<CopyDto>> {
   return apiFetch<Paginated<CopyDto>>('/holdings/copies?status=available&pageSize=100');
 }
 
-export function listEditionsForPicker(): Promise<Paginated<CatalogRecordDto>> {
-  return apiFetch<Paginated<CatalogRecordDto>>('/catalog/records?pageSize=100');
+export function listEditionsForPicker(q = ''): Promise<Paginated<CatalogRecordDto>> {
+  const search = new URLSearchParams({ pageSize: '100' });
+  if (q.trim()) search.set('q', q.trim());
+  return apiFetch<Paginated<CatalogRecordDto>>(`/catalog/records?${search.toString()}`);
 }
 
 export function listReservations(
@@ -128,7 +130,7 @@ export function expireReservations(): Promise<{ released: number }> {
 }
 
 export function listFines(
-  params: PageParams & { status?: FineStatus; borrowerId?: string } = {},
+  params: PageParams & { status?: FineStatus; borrowerId?: string; q?: string } = {},
 ): Promise<Paginated<FineDto>> {
   return apiFetch<Paginated<FineDto>>(`/circulation/fines${toQuery(params)}`);
 }

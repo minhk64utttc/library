@@ -1,5 +1,5 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import type { PageQuery, Paginated, PublisherDto, PublisherInput, PublisherUpdate } from '@thu-vien/shared';
+import type { PublisherListQuery, Paginated, PublisherDto, PublisherInput, PublisherUpdate } from '@thu-vien/shared';
 
 import { isRecordNotFound, isUniqueViolation } from '../../common/prisma/errors';
 import { PrismaService } from '../../infrastructure/database/prisma.service';
@@ -15,14 +15,16 @@ interface PublisherRow {
 export class PublishersService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async list({ page, pageSize }: PageQuery): Promise<Paginated<PublisherDto>> {
+  async list({ page, pageSize, q }: PublisherListQuery): Promise<Paginated<PublisherDto>> {
+    const where = q ? { OR: [{ code: { contains: q, mode: 'insensitive' as const } }, { name: { contains: q, mode: 'insensitive' as const } }] } : {};
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.publisher.findMany({
+        where,
         orderBy: { code: 'asc' },
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
-      this.prisma.publisher.count(),
+      this.prisma.publisher.count({ where }),
     ]);
 
     return { items: rows.map((row) => this.toDto(row)), total, page, pageSize };

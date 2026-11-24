@@ -1,4 +1,6 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Param, Post, Query, Res, UploadedFiles, UseGuards, UseInterceptors } from '@nestjs/common';
+import { FilesInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
 import { z } from 'zod';
 import {
   INCIDENT_STATUSES,
@@ -44,6 +46,35 @@ export class IncidentsController {
     @CurrentSession() session: SessionContext,
   ): Promise<IncidentDto> {
     return this.incidents.create(body, session.accountId);
+  }
+
+  @Post(':id/attachments')
+  @RequirePermissions('incidents:report')
+  @UseInterceptors(FilesInterceptor('files', 3, { limits: { fileSize: 5 * 1024 * 1024, files: 3 } }))
+  uploadAttachments(
+    @Param('id', new ZodValidationPipe(idSchema)) id: string,
+    @CurrentSession() session: SessionContext,
+    @UploadedFiles() files: Array<{ buffer: Buffer; mimetype: string; size: number; originalname: string }> | undefined,
+  ) {
+    if (!files?.length) throw new BadRequestException({ code: 'FILES_REQUIRED', message: 'Chọn ít nhất một ảnh JPEG, PNG hoặc WebP.' });
+    return this.incidents.uploadAttachments(id, session.accountId, files);
+  }
+
+  @Get(':id/attachments/:attachmentId')
+  @RequirePermissions('incidents:read')
+  async attachment(
+    @Param('id', new ZodValidationPipe(idSchema)) id: string,
+    @Param('attachmentId', new ZodValidationPipe(idSchema)) attachmentId: string,
+    @Res() response: Response,
+  ): Promise<void> {
+    const file = await this.incidents.attachment(id, attachmentId);
+    const safeName = encodeURIComponent(file.originalName).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+    response.setHeader('Content-Type', file.mimeType);
+    response.setHeader('Content-Length', file.buffer.length);
+    response.setHeader('Cache-Control', 'private, no-store');
+    response.setHeader('Content-Disposition', `inline; filename*=UTF-8''${safeName}`);
+    response.setHeader('X-Content-Type-Options', 'nosniff');
+    response.send(file.buffer);
   }
 
   @Post(':id/info')
